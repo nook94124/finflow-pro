@@ -2,7 +2,156 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --bg-ivory: #f8f6f0;
+  --card-white: #ffffff;
+  --emerald-deep: #053b2c;
+  --emerald-rich: #064e3b;
+  --emerald-vivid: #10b981;
+  --champagne-gold: #c6a87c;
+  --border-sand: #e5dfd1;
+}
+
+html,
 body {
-  background-color: theme('colors.bg');
-  color: theme('colors.ink');
+  font-family: "Noto Sans Thai", "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
+  background-color: var(--bg-ivory) !important;
+  background-image:
+    radial-gradient(at 0% 0%, rgba(198, 168, 124, 0.08) 0px, transparent 50%),
+    radial-gradient(at 100% 0%, rgba(6, 78, 59, 0.06) 0px, transparent 50%);
+  color: #14261f;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1, h2, h3, h4, .font-display {
+  font-family: "Anuphan", "Noto Sans Thai", "Plus Jakarta Sans", sans-serif;
+  letter-spacing: -0.02em;
+}
+
+.num {
+  font-family: "Plus Jakarta Sans", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+}
+
+/* กล่องข้อความสีขาวบริสุทธิ์ตัดขอบสีทรายงาช้าง */
+.fintech-card {
+  background: var(--card-white);
+  border: 1px solid var(--border-sand);
+  box-shadow:
+    0 2px 6px rgba(20, 38, 31, 0.02),
+    0 12px 32px -12px rgba(6, 78, 59, 0.08);
+  transition: transform 0.32s cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 0.25s ease,
+              border-color 0.2s ease,
+              background-color 0.2s ease;
+}
+
+/* การ์ดเด้งแรงขึ้น + กรอบสีเขียวและวงแหวนเรืองแสงชัดเจนเวลาเมาส์ชี้ */
+.fintech-card-hover:hover {
+  background-color: #f2fbf7 !important;
+  border-color: #059669 !important;
+  transform: translateY(-5px) scale(1.025);
+  box-shadow:
+    0 18px 34px -10px rgba(6, 78, 59, 0.22),
+    0 0 0 3px rgba(16, 185, 129, 0.28);
+}
+
+/* แบนเนอร์หลักเขียวมรกตลึกตัดเส้นขอบทองแชมเปญ */
+.fintech-hero-gradient {
+  background: linear-gradient(135deg, #03261d 0%, #064e3b 55%, #095c46 100%);
+  border: 1px solid rgba(198, 168, 124, 0.35);
+  box-shadow: 0 18px 40px -15px rgba(3, 38, 29, 0.35);
+}
+
+/* ลูกเล่นปุ่มกด: เด้งสปริงแรงขึ้น + เปลี่ยนสีไฮไลต์ชัดเจนเวลาเมาส์ชี้ */
+button,
+a[class*="rounded-full"],
+a[class*="rounded-xl"],
+a[class*="rounded-2xl"] {
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1),
+              box-shadow 0.22s ease,
+              background-color 0.18s ease,
+              border-color 0.18s ease,
+              color 0.18s ease;
+}
+
+/* เอฟเฟกต์เด้งลอย + ขอบเรืองแสงชัดเจนเมื่อนำเมาส์ชี้ทุกปุ่ม */
+button:hover:not(:disabled),
+a[class*="rounded-full"]:hover,
+a[class*="rounded-xl"]:hover,
+a[class*="rounded-2xl"]:hover {
+  transform: translateY(-4px) scale(1.035);
+  box-shadow:
+    0 12px 24px -6px rgba(6, 78, 59, 0.25),
+    0 0 0 2.5px rgba(16, 185, 129, 0.38);
+}
+
+/* ปุ่มสีอ่อน/ขาว เปลี่ยนพื้นเป็นเขียวมินต์อ่อน + ขอบเขียวเข้มทันทีที่เมาส์ชี้ */
+button:not([class*="bg-[#064e3b]"]):not([class*="bg-emerald-600"]):hover:not(:disabled),
+a[class*="bg-white"]:hover,
+a[class*="bg-[#f6faf8]"]:hover,
+a[class*="bg-[#f9fcfa]"]:hover {
+  background-color: #e6f7ef !important;
+  border-color: #059669 !important;
+  color: #04392b !important;
+}
+
+/* ปุ่มสีเขียวเข้ม สว่างขึ้นเป็นเขียวมรกตสดพร้อมขอบทองแชมเปญเวลาเมาส์ชี้ */
+button[class*="bg-[#064e3b]"]:hover:not(:disabled),
+button[class*="bg-emerald-600"]:hover:not(:disabled) {
+  background-color: #047857 !important;
+  border-color: #c6a87c !important;
+  box-shadow:
+    0 14px 28px -6px rgba(4, 120, 87, 0.42),
+    0 0 0 3px rgba(198, 168, 124, 0.45);
+}
+
+/* ยุบตัวเด้งกลับสมจริงจังหวะคลิก */
+button:active:not(:disabled),
+a[class*="rounded-full"]:active,
+a[class*="rounded-xl"]:active,
+a[class*="rounded-2xl"]:active {
+  transform: translateY(1px) scale(0.95);
+  transition-duration: 0.08s;
+}
+
+/* แสง Shimmer วิ่งผ่านปุ่มสีเขียวเข้มเวลาชี้เมาส์ */
+button[class*="bg-[#064e3b]"]::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -120%;
+  width: 65%;
+  height: 100%;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 250, 235, 0.35),
+    transparent
+  );
+  transform: skewX(-20deg);
+  transition: left 0.5s ease;
+  pointer-events: none;
+}
+
+button[class*="bg-[#064e3b]"]:hover::after {
+  left: 140%;
+}
+
+/* พื้นหลังกล่องย่อยโทน Warm Ivory */
+.bg-\[\#f9fcfa\],
+.bg-\[\#f6faf8\],
+.bg-\[\#fbfdfc\] {
+  background-color: #fbfaf6 !important;
+  border-color: #ebe5d8 !important;
+}
+
+.bg-\[\#f1f6f3\],
+.bg-\[\#f4f8f6\] {
+  background-color: #f2efe7 !important;
+  border-color: #e4ddd0 !important;
 }
