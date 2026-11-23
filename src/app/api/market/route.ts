@@ -4,7 +4,7 @@ export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
 const SEC_HEADERS = {
-  "User-Agent": "FlowSystemDashboard/11.0 (contact@flowsystem.app)",
+  "User-Agent": process.env.SEC_USER_AGENT || "FinFlowPro/1.1 (contact@finflow.app)",
   Accept: "application/json",
 };
 
@@ -13,6 +13,45 @@ const NO_CACHE_HEADERS = {
   Pragma: "no-cache",
   Expires: "0",
 };
+
+// ============================================================================
+// 1. IN-MEMORY TTL CACHE + STALE FALLBACK
+// ============================================================================
+interface CacheEntry<T> {
+  data: T;
+  expiresAt: number;
+}
+
+const gCache = globalThis as unknown as { __finflowCache?: Map<string, CacheEntry<unknown>> };
+const memoryCache = gCache.__finflowCache ?? new Map<string, CacheEntry<unknown>>();
+if (!gCache.__finflowCache) gCache.__finflowCache = memoryCache;
+
+function getFreshCache<T>(key: string): T | null {
+  const entry = memoryCache.get(key) as CacheEntry<T> | undefined;
+  return entry && Date.now() < entry.expiresAt ? entry.data : null;
+}
+
+function getStaleCache<T>(key: string): T | null {
+  const entry = memoryCache.get(key) as CacheEntry<T> | undefined;
+  return entry ? entry.data : null;
+}
+
+function setCache<T>(key: string, data: T, ttlMs: number): void {
+  memoryCache.set(key, { data, expiresAt: Date.now() + ttlMs });
+}
+
+// ============================================================================
+// 2. SMART TIMEOUT FETCH (ตัดการรออัตโนมัติหากแหล่งข้อมูลภายนอกตอบช้า)
+// ============================================================================
+async function fetchWithTimeout(url: string, options: RequestInit = {}, timeoutMs = 5500): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 interface FredObservation {
   date: string;
@@ -23,33 +62,66 @@ interface FredObservation {
 }
 
 async function fetchFredSeries(seriesId: string): Promise<FredObservation | null> {
+  const cacheKey = `fred:${seriesId}`;
+  const fresh = getFreshCache<FredObservation>(cacheKey);
+  if (fresh) return fresh;
+
+  const apiKey = process.env.FRED_API_KEY?.trim();
+  if (apiKey) {
+    try {
+      const apiUrl = `https://api.stlouisfed.org/fred/series/observations?series_id=${encodeURIComponent(
+        seriesId
+      )}&api_key=${encodeURIComponent(apiKey)}&file_type=json&sort_order=desc&limit=10`;
+      const res = await fetchWithTimeout(apiUrl, { cache: "no-store" }, 4500);
+      if (res.ok) {
+        const json = await res.json();
+        const valid = (json?.observations || [])
+          .map((o: { date: string; value: string }) => ({ date: o.date, val: parseFloat(o.value) }))
+          .filter((o: { date: string; val: number }) => o.date && isFinite(o.val));
+        if (valid.length > 0) {
+          const last = valid[0];
+          const prev = valid.length >= 2 ? valid[1] : last;
+          const result: FredObservation = {
+            date: last.date,
+            value: Math.round(last.val * 100) / 100,
+            prevValue: Math.round(prev.val * 100) / 100,
+            change: Math.round((last.val - prev.val) * 100) / 100,
+            sourceUrl: `https://fred.stlouisfed.org/series/${seriesId}`,
+          };
+          setCache(cacheKey, result, 15 * 60 * 1000);
+          return result;
+        }
+      }
+    } catch {
+      // สลับไปใช้ช่องทาง CSV สาธารณะด้านล่าง
+    }
+  }
+
   try {
     const url = `https://fred.stlouisfed.org/graph/fredgraph.csv?id=${encodeURIComponent(seriesId)}`;
-    const res = await fetch(url, {
-      headers: { "User-Agent": "FlowSystemDashboard/11.0" },
-      cache: "no-store",
-    });
-    if (!res.ok) return null;
-    const text = await res.text();
-    const lines = text.trim().split("\n").slice(1);
+    const res = await fetchWithTimeout(url, { headers: { "User-Agent": "FinFlowPro/1.1" }, cache: "no-store" }, 5000);
+    if (!res.ok) return getStaleCache<FredObservation>(cacheKey);
+    const lines = (await res.text()).trim().split("\n").slice(1);
     const valid: { date: string; val: number }[] = [];
     for (let i = Math.max(0, lines.length - 15); i < lines.length; i++) {
       const [dt, raw] = lines[i].split(",");
       const num = parseFloat(raw);
       if (dt && isFinite(num)) valid.push({ date: dt.trim(), val: num });
     }
-    if (valid.length === 0) return null;
+    if (valid.length === 0) return getStaleCache<FredObservation>(cacheKey);
     const last = valid[valid.length - 1];
     const prev = valid.length >= 2 ? valid[valid.length - 2] : last;
-    return {
+    const result: FredObservation = {
       date: last.date,
       value: Math.round(last.val * 100) / 100,
       prevValue: Math.round(prev.val * 100) / 100,
       change: Math.round((last.val - prev.val) * 100) / 100,
       sourceUrl: `https://fred.stlouisfed.org/series/${seriesId}`,
     };
+    setCache(cacheKey, result, 15 * 60 * 1000);
+    return result;
   } catch {
-    return null;
+    return getStaleCache<FredObservation>(cacheKey);
   }
 }
 
@@ -57,23 +129,28 @@ let cachedSecTickers: Record<string, { cik: string; title: string }> | null = nu
 
 async function resolveSecCik(ticker: string) {
   if (!cachedSecTickers) {
-    const res = await fetch("https://www.sec.gov/files/company_tickers.json", {
-      headers: SEC_HEADERS,
-      next: { revalidate: 86400 },
-    });
-    if (res.ok) {
-      const json = await res.json();
-      const map: Record<string, { cik: string; title: string }> = {};
-      for (const key of Object.keys(json)) {
-        const item = json[key];
-        if (item?.ticker && item?.cik_str) {
-          map[String(item.ticker).toUpperCase()] = {
-            cik: String(item.cik_str).padStart(10, "0"),
-            title: item.title || item.ticker,
-          };
+    try {
+      const res = await fetchWithTimeout(
+        "https://www.sec.gov/files/company_tickers.json",
+        { headers: SEC_HEADERS, next: { revalidate: 86400 } },
+        6000
+      );
+      if (res.ok) {
+        const json = await res.json();
+        const map: Record<string, { cik: string; title: string }> = {};
+        for (const key of Object.keys(json)) {
+          const item = json[key];
+          if (item?.ticker && item?.cik_str) {
+            map[String(item.ticker).toUpperCase()] = {
+              cik: String(item.cik_str).padStart(10, "0"),
+              title: item.title || item.ticker,
+            };
+          }
         }
+        cachedSecTickers = map;
       }
-      cachedSecTickers = map;
+    } catch {
+      return null;
     }
   }
   const cleanTicker = ticker.replace(/\..*$/, "").toUpperCase();
@@ -91,53 +168,45 @@ function extractSecFactSeries(usGaap: any, tags: string[]) {
     if (!Array.isArray(units)) continue;
     for (const item of units) {
       if (typeof item.val !== "number" || !item.end) continue;
-      const form = item.form || "";
-      if (!["10-K", "10-Q", "20-F", "40-F"].includes(form)) continue;
-
+      if (!["10-K", "10-Q", "20-F", "40-F"].includes(item.form || "")) continue;
       if (!item.start) {
-        const existing = instantMap[item.end];
-        if (!existing || (item.filed || "") >= existing.filed) {
-          instantMap[item.end] = { end: item.end, val: item.val, filed: item.filed || "" };
-        }
+        const ex = instantMap[item.end];
+        if (!ex || (item.filed || "") >= ex.filed) instantMap[item.end] = { end: item.end, val: item.val, filed: item.filed || "" };
       } else {
         const days = (new Date(item.end).getTime() - new Date(item.start).getTime()) / 86400000;
         if (days >= 330 && days <= 380) {
           const yrKey = item.end.slice(0, 4);
-          const existing = annualMap[yrKey];
-          if (!existing || (item.filed || "") >= existing.filed) {
-            annualMap[yrKey] = { end: item.end, val: item.val, filed: item.filed || "" };
-          }
+          const ex = annualMap[yrKey];
+          if (!ex || (item.filed || "") >= ex.filed) annualMap[yrKey] = { end: item.end, val: item.val, filed: item.filed || "" };
         } else if (days >= 75 && days <= 105) {
-          const existing = quarterMap[item.end];
-          if (!existing || (item.filed || "") >= existing.filed) {
-            quarterMap[item.end] = { end: item.end, val: item.val, filed: item.filed || "" };
-          }
+          const ex = quarterMap[item.end];
+          if (!ex || (item.filed || "") >= ex.filed) quarterMap[item.end] = { end: item.end, val: item.val, filed: item.filed || "" };
         }
       }
     }
     if (Object.keys(annualMap).length >= 2 || Object.keys(instantMap).length >= 2) break;
   }
 
-  const annuals = Object.values(annualMap).sort((a, b) => b.end.localeCompare(a.end));
-  const quarters = Object.values(quarterMap).sort((a, b) => b.end.localeCompare(a.end));
-  const instants = Object.values(instantMap).sort((a, b) => b.end.localeCompare(a.end));
-  return { annuals, quarters, instants };
+  return {
+    annuals: Object.values(annualMap).sort((a, b) => b.end.localeCompare(a.end)),
+    quarters: Object.values(quarterMap).sort((a, b) => b.end.localeCompare(a.end)),
+    instants: Object.values(instantMap).sort((a, b) => b.end.localeCompare(a.end)),
+  };
 }
 
 async function fetchSecOfficialData(ticker: string) {
+  const cacheKey = `sec:${ticker.toUpperCase()}`;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fresh = getFreshCache<any>(cacheKey);
+  if (fresh) return fresh;
+
   try {
     const entry = await resolveSecCik(ticker);
     if (!entry) return null;
 
     const [subRes, factsRes] = await Promise.all([
-      fetch(`https://data.sec.gov/submissions/CIK${entry.cik}.json`, {
-        headers: SEC_HEADERS,
-        next: { revalidate: 3600 },
-      }),
-      fetch(`https://data.sec.gov/api/xbrl/companyfacts/CIK${entry.cik}.json`, {
-        headers: SEC_HEADERS,
-        next: { revalidate: 3600 },
-      }),
+      fetchWithTimeout(`https://data.sec.gov/submissions/CIK${entry.cik}.json`, { headers: SEC_HEADERS, next: { revalidate: 3600 } }, 6000),
+      fetchWithTimeout(`https://data.sec.gov/api/xbrl/companyfacts/CIK${entry.cik}.json`, { headers: SEC_HEADERS, next: { revalidate: 3600 } }, 6500),
     ]);
 
     let secFiling = {
@@ -158,17 +227,11 @@ async function fetchSecOfficialData(ticker: string) {
       const filingDates: string[] = recent.filingDate || [];
       const reportDates: string[] = recent.reportDate || [];
       const primaryDocs: string[] = recent.primaryDocument || [];
-
       let idx = forms.findIndex((f) => f === "10-K" || f === "10-Q");
       if (idx === -1) idx = 0;
 
       const accClean = (accNums[idx] || "").replace(/-/g, "");
       const cikNum = String(parseInt(entry.cik, 10));
-      const docUrl =
-        accClean && primaryDocs[idx]
-          ? `https://www.sec.gov/Archives/edgar/data/${cikNum}/${accClean}/${primaryDocs[idx]}`
-          : `https://www.sec.gov/edgar/browse/?CIK=${entry.cik}`;
-
       secFiling = {
         cik: entry.cik,
         entityName: sub?.name || entry.title,
@@ -176,21 +239,21 @@ async function fetchSecOfficialData(ticker: string) {
         latestForm: forms[idx] || "SEC Filing",
         filingDate: filingDates[idx] || "",
         reportDate: reportDates[idx] || "",
-        documentUrl: docUrl,
+        documentUrl:
+          accClean && primaryDocs[idx]
+            ? `https://www.sec.gov/Archives/edgar/data/${cikNum}/${accClean}/${primaryDocs[idx]}`
+            : `https://www.sec.gov/edgar/browse/?CIK=${entry.cik}`,
       };
     }
 
-    if (!factsRes.ok) return { secFiling, secSummary: null };
+    if (!factsRes.ok) {
+      const partial = { secFiling, secSummary: null };
+      setCache(cacheKey, partial, 10 * 60 * 1000);
+      return partial;
+    }
 
-    const factsJson = await factsRes.json();
-    const gaap = factsJson?.facts?.["us-gaap"] || {};
-
-    const revS = extractSecFactSeries(gaap, [
-      "RevenueFromContractWithCustomerExcludingAssessedTax",
-      "Revenues",
-      "SalesRevenueNet",
-      "RevenueFromContractWithCustomerIncludingAssessedTax",
-    ]);
+    const gaap = (await factsRes.json())?.facts?.["us-gaap"] || {};
+    const revS = extractSecFactSeries(gaap, ["RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues", "SalesRevenueNet", "RevenueFromContractWithCustomerIncludingAssessedTax"]);
     const costS = extractSecFactSeries(gaap, ["CostOfGoodsAndServicesSold", "CostOfRevenue", "CostOfGoodsSold"]);
     const gmS = extractSecFactSeries(gaap, ["GrossProfit"]);
     const rdS = extractSecFactSeries(gaap, ["ResearchAndDevelopmentExpense"]);
@@ -222,28 +285,63 @@ async function fetchSecOfficialData(ticker: string) {
     const debtRepayS = extractSecFactSeries(gaap, ["RepaymentsOfLongTermDebt"]);
     const cffS = extractSecFactSeries(gaap, ["NetCashProvidedByUsedInFinancingActivities"]);
 
-    const y0End = revS.annuals[0]?.end || niS.annuals[0]?.end || "";
-    const y1End = revS.annuals[1]?.end || niS.annuals[1]?.end || "";
-    const q0End = revS.quarters[0]?.end || niS.quarters[0]?.end || "";
-    const q1End = revS.quarters[1]?.end || niS.quarters[1]?.end || "";
-    const b0End = totAssetS.instants[0]?.end || cashS.instants[0]?.end || "";
-    const b1End = totAssetS.instants[1]?.end || cashS.instants[1]?.end || "";
-
     const raw = (v?: number) => (typeof v === "number" && isFinite(v) ? { raw: v } : undefined);
-
-    const rev0 = revS.annuals[0]?.val || 0;
-    const rev1 = revS.annuals[1]?.val || 0;
-    const cost0 = costS.annuals[0]?.val || 0;
-    const cost1 = costS.annuals[1]?.val || 0;
+    const rev0 = revS.annuals[0]?.val || 0, rev1 = revS.annuals[1]?.val || 0;
+    const cost0 = costS.annuals[0]?.val || 0, cost1 = costS.annuals[1]?.val || 0;
     const gm0 = gmS.annuals[0]?.val || (rev0 && cost0 ? rev0 - cost0 : 0);
     const gm1 = gmS.annuals[1]?.val || (rev1 && cost1 ? rev1 - cost1 : 0);
-
-    const qRev0 = revS.quarters[0]?.val || 0;
-    const qRev1 = revS.quarters[1]?.val || 0;
-    const qCost0 = costS.quarters[0]?.val || 0;
-    const qCost1 = costS.quarters[1]?.val || 0;
+    const qRev0 = revS.quarters[0]?.val || 0, qRev1 = revS.quarters[1]?.val || 0;
+    const qCost0 = costS.quarters[0]?.val || 0, qCost1 = costS.quarters[1]?.val || 0;
     const qGm0 = gmS.quarters[0]?.val || (qRev0 && qCost0 ? qRev0 - qCost0 : 0);
     const qGm1 = gmS.quarters[1]?.val || (qRev1 && qCost1 ? qRev1 - qCost1 : 0);
+
+    const buildIs = (idx: number, rv: number, cs: number, gp: number, endStr: string) => ({
+      endDate: { fmt: endStr },
+      totalRevenue: raw(rv),
+      costOfRevenue: raw(cs),
+      grossProfit: raw(gp),
+      researchDevelopment: raw(idx < 2 ? rdS.annuals[idx]?.val : rdS.quarters[idx - 2]?.val),
+      sellingGeneralAdministrative: raw(idx < 2 ? sgaS.annuals[idx]?.val : sgaS.quarters[idx - 2]?.val),
+      totalOperatingExpenses: raw(
+        ((idx < 2 ? rdS.annuals[idx]?.val : rdS.quarters[idx - 2]?.val) || 0) +
+          ((idx < 2 ? sgaS.annuals[idx]?.val : sgaS.quarters[idx - 2]?.val) || 0)
+      ),
+      operatingIncome: raw(idx < 2 ? oiS.annuals[idx]?.val : oiS.quarters[idx - 2]?.val),
+      incomeBeforeTax: raw(
+        ((idx < 2 ? niS.annuals[idx]?.val : niS.quarters[idx - 2]?.val) || 0) +
+          ((idx < 2 ? taxS.annuals[idx]?.val : taxS.quarters[idx - 2]?.val) || 0)
+      ),
+      incomeTaxExpense: raw(idx < 2 ? taxS.annuals[idx]?.val : taxS.quarters[idx - 2]?.val),
+      netIncome: raw(idx < 2 ? niS.annuals[idx]?.val : niS.quarters[idx - 2]?.val),
+    });
+
+    const buildBs = (idx: number) => ({
+      endDate: { fmt: totAssetS.instants[idx]?.end || cashS.instants[idx]?.end || "" },
+      cash: raw(cashS.instants[idx]?.val),
+      shortTermInvestments: raw(stInvS.instants[idx]?.val),
+      netReceivables: raw(arS.instants[idx]?.val),
+      inventory: raw(invS.instants[idx]?.val),
+      totalCurrentAssets: raw(curAssetS.instants[idx]?.val),
+      totalAssets: raw(totAssetS.instants[idx]?.val),
+      accountsPayable: raw(apS.instants[idx]?.val),
+      shortLongTermDebt: raw((cpS.instants[idx]?.val || 0) + (stDebtS.instants[idx]?.val || 0)),
+      longTermDebt: raw(ltDebtS.instants[idx]?.val),
+      totalCurrentLiabilities: raw(curLiabS.instants[idx]?.val),
+      totalLiab: raw(totLiabS.instants[idx]?.val),
+      totalStockholderEquity: raw(eqS.instants[idx]?.val),
+    });
+
+    const buildCf = (idx: number) => ({
+      endDate: { fmt: revS.annuals[idx]?.end || niS.annuals[idx]?.end || "" },
+      totalCashFromOperatingActivities: raw(cfoS.annuals[idx]?.val),
+      depreciation: raw(depS.annuals[idx]?.val),
+      capitalExpenditures: raw(capexS.annuals[idx]?.val ? -Math.abs(capexS.annuals[idx].val) : 0),
+      totalCashflowsFromInvestingActivities: raw(cfiS.annuals[idx]?.val),
+      dividendsPaid: raw(divS.annuals[idx]?.val ? -Math.abs(divS.annuals[idx].val) : 0),
+      repurchaseOfStock: raw(bbS.annuals[idx]?.val ? -Math.abs(bbS.annuals[idx].val) : 0),
+      netBorrowings: raw(debtRepayS.annuals[idx]?.val ? -Math.abs(debtRepayS.annuals[idx].val) : 0),
+      totalCashFromFinancingActivities: raw(cffS.annuals[idx]?.val),
+    });
 
     const secSummary = {
       assetProfile: { country: "United States (SEC Registered)" },
@@ -256,187 +354,72 @@ async function fetchSecOfficialData(ticker: string) {
       },
       incomeStatementHistory: {
         incomeStatementHistory: [
-          {
-            endDate: { fmt: y0End },
-            totalRevenue: raw(rev0),
-            costOfRevenue: raw(cost0),
-            grossProfit: raw(gm0),
-            researchDevelopment: raw(rdS.annuals[0]?.val),
-            sellingGeneralAdministrative: raw(sgaS.annuals[0]?.val),
-            totalOperatingExpenses: raw((rdS.annuals[0]?.val || 0) + (sgaS.annuals[0]?.val || 0)),
-            operatingIncome: raw(oiS.annuals[0]?.val),
-            incomeBeforeTax: raw((niS.annuals[0]?.val || 0) + (taxS.annuals[0]?.val || 0)),
-            incomeTaxExpense: raw(taxS.annuals[0]?.val),
-            netIncome: raw(niS.annuals[0]?.val),
-          },
-          {
-            endDate: { fmt: y1End },
-            totalRevenue: raw(rev1),
-            costOfRevenue: raw(cost1),
-            grossProfit: raw(gm1),
-            researchDevelopment: raw(rdS.annuals[1]?.val),
-            sellingGeneralAdministrative: raw(sgaS.annuals[1]?.val),
-            totalOperatingExpenses: raw((rdS.annuals[1]?.val || 0) + (sgaS.annuals[1]?.val || 0)),
-            operatingIncome: raw(oiS.annuals[1]?.val),
-            incomeBeforeTax: raw((niS.annuals[1]?.val || 0) + (taxS.annuals[1]?.val || 0)),
-            incomeTaxExpense: raw(taxS.annuals[1]?.val),
-            netIncome: raw(niS.annuals[1]?.val),
-          },
+          buildIs(0, rev0, cost0, gm0, revS.annuals[0]?.end || niS.annuals[0]?.end || ""),
+          buildIs(1, rev1, cost1, gm1, revS.annuals[1]?.end || niS.annuals[1]?.end || ""),
         ],
       },
       incomeStatementHistoryQuarterly: {
         incomeStatementHistory: [
-          {
-            endDate: { fmt: q0End },
-            totalRevenue: raw(qRev0),
-            costOfRevenue: raw(qCost0),
-            grossProfit: raw(qGm0),
-            researchDevelopment: raw(rdS.quarters[0]?.val),
-            sellingGeneralAdministrative: raw(sgaS.quarters[0]?.val),
-            totalOperatingExpenses: raw((rdS.quarters[0]?.val || 0) + (sgaS.quarters[0]?.val || 0)),
-            operatingIncome: raw(oiS.quarters[0]?.val),
-            incomeBeforeTax: raw((niS.quarters[0]?.val || 0) + (taxS.quarters[0]?.val || 0)),
-            incomeTaxExpense: raw(taxS.quarters[0]?.val),
-            netIncome: raw(niS.quarters[0]?.val),
-          },
-          {
-            endDate: { fmt: q1End },
-            totalRevenue: raw(qRev1),
-            costOfRevenue: raw(qCost1),
-            grossProfit: raw(qGm1),
-            researchDevelopment: raw(rdS.quarters[1]?.val),
-            sellingGeneralAdministrative: raw(sgaS.quarters[1]?.val),
-            totalOperatingExpenses: raw((rdS.quarters[1]?.val || 0) + (sgaS.quarters[1]?.val || 0)),
-            operatingIncome: raw(oiS.quarters[1]?.val),
-            incomeBeforeTax: raw((niS.quarters[1]?.val || 0) + (taxS.quarters[1]?.val || 0)),
-            incomeTaxExpense: raw(taxS.quarters[1]?.val),
-            netIncome: raw(niS.quarters[1]?.val),
-          },
+          buildIs(2, qRev0, qCost0, qGm0, revS.quarters[0]?.end || niS.quarters[0]?.end || ""),
+          buildIs(3, qRev1, qCost1, qGm1, revS.quarters[1]?.end || niS.quarters[1]?.end || ""),
         ],
       },
-      balanceSheetHistory: {
-        balanceSheetStatements: [
-          {
-            endDate: { fmt: b0End },
-            cash: raw(cashS.instants[0]?.val),
-            shortTermInvestments: raw(stInvS.instants[0]?.val),
-            netReceivables: raw(arS.instants[0]?.val),
-            inventory: raw(invS.instants[0]?.val),
-            totalCurrentAssets: raw(curAssetS.instants[0]?.val),
-            totalAssets: raw(totAssetS.instants[0]?.val),
-            accountsPayable: raw(apS.instants[0]?.val),
-            shortLongTermDebt: raw((cpS.instants[0]?.val || 0) + (stDebtS.instants[0]?.val || 0)),
-            longTermDebt: raw(ltDebtS.instants[0]?.val),
-            totalCurrentLiabilities: raw(curLiabS.instants[0]?.val),
-            totalLiab: raw(totLiabS.instants[0]?.val),
-            totalStockholderEquity: raw(eqS.instants[0]?.val),
-          },
-          {
-            endDate: { fmt: b1End },
-            cash: raw(cashS.instants[1]?.val),
-            shortTermInvestments: raw(stInvS.instants[1]?.val),
-            netReceivables: raw(arS.instants[1]?.val),
-            inventory: raw(invS.instants[1]?.val),
-            totalCurrentAssets: raw(curAssetS.instants[1]?.val),
-            totalAssets: raw(totAssetS.instants[1]?.val),
-            accountsPayable: raw(apS.instants[1]?.val),
-            shortLongTermDebt: raw((cpS.instants[1]?.val || 0) + (stDebtS.instants[1]?.val || 0)),
-            longTermDebt: raw(ltDebtS.instants[1]?.val),
-            totalCurrentLiabilities: raw(curLiabS.instants[1]?.val),
-            totalLiab: raw(totLiabS.instants[1]?.val),
-            totalStockholderEquity: raw(eqS.instants[1]?.val),
-          },
-        ],
-      },
-      cashflowStatementHistory: {
-        cashflowStatements: [
-          {
-            endDate: { fmt: y0End },
-            totalCashFromOperatingActivities: raw(cfoS.annuals[0]?.val),
-            depreciation: raw(depS.annuals[0]?.val),
-            capitalExpenditures: raw(capexS.annuals[0]?.val ? -Math.abs(capexS.annuals[0].val) : 0),
-            totalCashflowsFromInvestingActivities: raw(cfiS.annuals[0]?.val),
-            dividendsPaid: raw(divS.annuals[0]?.val ? -Math.abs(divS.annuals[0].val) : 0),
-            repurchaseOfStock: raw(bbS.annuals[0]?.val ? -Math.abs(bbS.annuals[0].val) : 0),
-            netBorrowings: raw(debtRepayS.annuals[0]?.val ? -Math.abs(debtRepayS.annuals[0].val) : 0),
-            totalCashFromFinancingActivities: raw(cffS.annuals[0]?.val),
-          },
-          {
-            endDate: { fmt: y1End },
-            totalCashFromOperatingActivities: raw(cfoS.annuals[1]?.val),
-            depreciation: raw(depS.annuals[1]?.val),
-            capitalExpenditures: raw(capexS.annuals[1]?.val ? -Math.abs(capexS.annuals[1].val) : 0),
-            totalCashflowsFromInvestingActivities: raw(cfiS.annuals[1]?.val),
-            dividendsPaid: raw(divS.annuals[1]?.val ? -Math.abs(divS.annuals[1].val) : 0),
-            repurchaseOfStock: raw(bbS.annuals[1]?.val ? -Math.abs(bbS.annuals[1].val) : 0),
-            netBorrowings: raw(debtRepayS.annuals[1]?.val ? -Math.abs(debtRepayS.annuals[1].val) : 0),
-            totalCashFromFinancingActivities: raw(cffS.annuals[1]?.val),
-          },
-        ],
-      },
+      balanceSheetHistory: { balanceSheetStatements: [buildBs(0), buildBs(1)] },
+      cashflowStatementHistory: { cashflowStatements: [buildCf(0), buildCf(1)] },
     };
 
-    return { secFiling, secSummary: rev0 > 0 || niS.annuals.length > 0 ? secSummary : null };
+    const payload = { secFiling, secSummary: rev0 > 0 || niS.annuals.length > 0 ? secSummary : null };
+    setCache(cacheKey, payload, 15 * 60 * 1000);
+    return payload;
   } catch {
-    return null;
+    return getStaleCache(cacheKey);
   }
 }
 
 async function fetchYahooFinancialsFallback(symbol: string) {
-  try {
-    const cookieRes = await fetch("https://fc.yahoo.com", {
-      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
-      cache: "no-store",
-    });
-    const setCookie = cookieRes.headers.get("set-cookie") || "";
-    const cookie = setCookie.split(";")[0];
+  const cacheKey = `yfin:${symbol.toUpperCase()}`;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fresh = getFreshCache<any>(cacheKey);
+  if (fresh) return fresh;
 
-    const crumbRes = await fetch("https://query1.finance.yahoo.com/v1/test/getcrumb", {
-      headers: { "User-Agent": "Mozilla/5.0", Cookie: cookie },
-      cache: "no-store",
-    });
+  try {
+    const cookieRes = await fetchWithTimeout("https://fc.yahoo.com", { headers: { "User-Agent": "Mozilla/5.0" }, cache: "no-store" }, 4000);
+    const cookie = (cookieRes.headers.get("set-cookie") || "").split(";")[0];
+    const crumbRes = await fetchWithTimeout("https://query1.finance.yahoo.com/v1/test/getcrumb", { headers: { "User-Agent": "Mozilla/5.0", Cookie: cookie }, cache: "no-store" }, 4000);
     const crumb = await crumbRes.text();
 
     const modules = [
-      "assetProfile",
-      "summaryDetail",
-      "financialData",
-      "defaultKeyStatistics",
-      "incomeStatementHistory",
-      "incomeStatementHistoryQuarterly",
-      "balanceSheetHistory",
-      "cashflowStatementHistory",
+      "assetProfile", "summaryDetail", "financialData", "defaultKeyStatistics",
+      "incomeStatementHistory", "incomeStatementHistoryQuarterly", "balanceSheetHistory", "cashflowStatementHistory",
     ].join(",");
 
     const url = `https://query2.finance.yahoo.com/v10/finance/quoteSummary/${encodeURIComponent(symbol)}?modules=${modules}&crumb=${encodeURIComponent(crumb)}`;
-    const res = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0", Cookie: cookie },
-      next: { revalidate: 3600 },
-    });
-    if (!res.ok) return null;
-    const json = await res.json();
-    return json?.quoteSummary?.result?.[0] || null;
+    const res = await fetchWithTimeout(url, { headers: { "User-Agent": "Mozilla/5.0", Cookie: cookie }, next: { revalidate: 3600 } }, 5500);
+    if (!res.ok) return getStaleCache(cacheKey);
+    const result = (await res.json())?.quoteSummary?.result?.[0] || null;
+    if (result) setCache(cacheKey, result, 10 * 60 * 1000);
+    return result;
   } catch {
-    return null;
+    return getStaleCache(cacheKey);
   }
 }
 
-async function fetchTickerChartData(
-  tk: string,
-  range = "1mo",
-  interval = "1d",
-  includeSparkline = false,
-  includeCloses = false
-) {
+async function fetchTickerChartData(tk: string, range = "1mo", interval = "1d", includeSparkline = false, includeCloses = false) {
+  const cacheKey = `chart:${tk}:${range}:${interval}:${includeSparkline ? 1 : 0}:${includeCloses ? 1 : 0}`;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fresh = getFreshCache<any>(cacheKey);
+  if (fresh) return fresh;
+
   try {
-    const dailyRes = await fetch(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(tk)}?interval=1d&range=${includeSparkline ? "1mo" : "5d"}`,
-      { headers: { "User-Agent": "Mozilla/5.0" }, cache: "no-store" }
+    const effectiveRange = includeSparkline ? range : "5d";
+    const dailyRes = await fetchWithTimeout(
+      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(tk)}?interval=${encodeURIComponent(interval)}&range=${encodeURIComponent(effectiveRange)}`,
+      { headers: { "User-Agent": "Mozilla/5.0" }, cache: "no-store" },
+      5000
     );
-    if (!dailyRes.ok) return null;
-    const dailyJson = await dailyRes.json();
-    const d0 = dailyJson?.chart?.result?.[0];
-    if (!d0) return null;
+    if (!dailyRes.ok) return getStaleCache(cacheKey);
+    const d0 = (await dailyRes.json())?.chart?.result?.[0];
+    if (!d0) return getStaleCache(cacheKey);
 
     const meta = d0.meta;
     const dQuote = d0.indicators?.quote?.[0] || {};
@@ -444,29 +427,19 @@ async function fetchTickerChartData(
     const dVolumes: number[] = (dQuote.volume || []).filter((v: number | null): v is number => typeof v === "number" && isFinite(v));
 
     const price = meta.regularMarketPrice ?? dCloses[dCloses.length - 1] ?? 0;
-
     let prevClose = meta.regularMarketPreviousClose;
     if (!prevClose || Math.abs(prevClose - price) < 0.0001) {
-      if (dCloses.length >= 2 && Math.abs(dCloses[dCloses.length - 1] - price) < 0.05) {
-        prevClose = dCloses[dCloses.length - 2];
-      } else if (dCloses.length >= 1 && Math.abs(dCloses[dCloses.length - 1] - price) >= 0.05) {
-        prevClose = dCloses[dCloses.length - 1];
-      } else {
-        prevClose = meta.chartPreviousClose ?? price;
-      }
+      if (dCloses.length >= 2 && Math.abs(dCloses[dCloses.length - 1] - price) < 0.05) prevClose = dCloses[dCloses.length - 2];
+      else if (dCloses.length >= 1 && Math.abs(dCloses[dCloses.length - 1] - price) >= 0.05) prevClose = dCloses[dCloses.length - 1];
+      else prevClose = meta.chartPreviousClose ?? price;
     }
 
     const last5 = dCloses.slice(-5);
     const first5dClose = last5.length >= 2 ? last5[0] : meta.chartPreviousClose ?? prevClose;
     const changePct = prevClose ? Math.round(((price - prevClose) / prevClose) * 10000) / 100 : 0;
     const change5dPct = first5dClose ? Math.round(((price - first5dClose) / first5dClose) * 10000) / 100 : 0;
-
-    const lastVol = meta.regularMarketVolume ?? dVolumes[dVolumes.length - 1] ?? 0;
-    const dollarVolume = Math.round(price * lastVol);
-
-    const ts = meta.regularMarketTime
-      ? new Date(meta.regularMarketTime * 1000).toISOString().split("T")[0]
-      : new Date().toISOString().split("T")[0];
+    const dollarVolume = Math.round(price * (meta.regularMarketVolume ?? dVolumes[dVolumes.length - 1] ?? 0));
+    const ts = meta.regularMarketTime ? new Date(meta.regularMarketTime * 1000).toISOString().split("T")[0] : new Date().toISOString().split("T")[0];
 
     let sparkline: { time: string; open: number; high: number; low: number; close: number }[] = [];
     let closesOut: number[] | undefined = undefined;
@@ -494,13 +467,12 @@ async function fetchTickerChartData(
         }
       }
 
-      // Fallback สำหรับดัชนีตลาดหุ้นไทย (^SET.BK) ที่ Yahoo จำกัดแท่งย้อนหลัง ใช้กองทุนอ้างอิงดัชนีตลาดหุ้นไทย (TDEX.BK) ปรับสเกลเทียบระดับ SET Index
       if (sparkline.length < 2 && tk === "^SET.BK") {
         const thProxy = await fetchTickerChartData("TDEX.BK", "1mo", "1d", true, false);
         if (thProxy && thProxy.sparkline.length >= 2) {
           const lastProxyClose = thProxy.sparkline[thProxy.sparkline.length - 1].close;
           const scale = lastProxyClose > 0 && price > 0 ? price / lastProxyClose : 1;
-          sparkline = thProxy.sparkline.map((pt) => ({
+          sparkline = thProxy.sparkline.map((pt: { time: string; open: number; high: number; low: number; close: number }) => ({
             time: pt.time,
             open: Math.round(pt.open * scale * 100) / 100,
             high: Math.round(pt.high * scale * 100) / 100,
@@ -512,28 +484,18 @@ async function fetchTickerChartData(
     }
 
     if (includeCloses) {
-      const sRes = await fetch(
-        `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(tk)}?interval=1d&range=3mo`,
-        { headers: { "User-Agent": "Mozilla/5.0" }, cache: "no-store" }
-      );
+      const sRes = await fetchWithTimeout(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(tk)}?interval=1d&range=3mo`, { headers: { "User-Agent": "Mozilla/5.0" }, cache: "no-store" }, 5000);
       if (sRes.ok) {
-        const sJson = await sRes.json();
-        const s0 = sJson?.chart?.result?.[0];
+        const s0 = (await sRes.json())?.chart?.result?.[0];
         if (s0) {
           const sCloses: (number | null)[] = s0.indicators?.quote?.[0]?.close || [];
-          const valid3m = sCloses.filter((v): v is number => typeof v === "number" && isFinite(v));
-          closesOut = valid3m.slice(-45).map((v) => Math.round(v * 100) / 100);
+          closesOut = sCloses.filter((v): v is number => typeof v === "number" && isFinite(v)).slice(-45).map((v) => Math.round(v * 100) / 100);
         }
       }
     }
 
-    return {
-      price,
-      prevClose,
-      changePct,
-      change5dPct,
-      dollarVolume,
-      date: ts,
+    const out = {
+      price, prevClose, changePct, change5dPct, dollarVolume, date: ts,
       currency: meta.currency || "USD",
       exchangeName: meta.fullExchangeName || meta.exchangeName || "Market Exchange",
       fiftyTwoWeekLow: meta.fiftyTwoWeekLow,
@@ -541,29 +503,34 @@ async function fetchTickerChartData(
       sparkline,
       closes: closesOut,
     };
+    setCache(cacheKey, out, 60 * 1000);
+    return out;
   } catch {
-    return null;
+    return getStaleCache(cacheKey);
   }
 }
 
 async function fetchYahooNewsByQuery(q: string, count = 3) {
+  const cacheKey = `news:${q}:${count}`;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const fresh = getFreshCache<any[]>(cacheKey);
+  if (fresh) return fresh;
+
   try {
-    const r = await fetch(
-      `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&newsCount=${count + 3}&quotesCount=0`,
-      { headers: { "User-Agent": "Mozilla/5.0" }, cache: "no-store" }
-    );
-    if (!r.ok) return [];
-    const j = await r.json();
-    const newsList = j?.news || [];
+    const r = await fetchWithTimeout(`https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(q)}&newsCount=${count + 3}&quotesCount=0`, { headers: { "User-Agent": "Mozilla/5.0" }, cache: "no-store" }, 4500);
+    if (!r.ok) return getStaleCache<unknown[]>(cacheKey) || [];
+    const newsList = (await r.json())?.news || [];
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return newsList.slice(0, count).map((n: any) => ({
+    const out = newsList.slice(0, count).map((n: any) => ({
       title: n.title || "",
       publisher: n.publisher || "Yahoo Finance",
       link: n.link || "https://finance.yahoo.com",
       providerPublishTime: n.providerPublishTime || 0,
     }));
+    setCache(cacheKey, out, 3 * 60 * 1000);
+    return out;
   } catch {
-    return [];
+    return getStaleCache<unknown[]>(cacheKey) || [];
   }
 }
 
@@ -574,14 +541,7 @@ export async function GET(request: Request) {
   const newsQuery = searchParams.get("newsQuery");
   const rangeParam = searchParams.get("range") || "3mo";
 
-  const validRanges: Record<string, string> = {
-    "1d": "15m",
-    "1mo": "1d",
-    "3mo": "1d",
-    "6mo": "1d",
-    "1y": "1wk",
-    "5y": "1mo",
-  };
+  const validRanges: Record<string, string> = { "1d": "15m", "1mo": "1d", "3mo": "1d", "6mo": "1d", "1y": "1wk", "5y": "1mo" };
   const range = validRanges[rangeParam] ? rangeParam : "3mo";
   const interval = validRanges[range] || "1d";
 
@@ -592,12 +552,8 @@ export async function GET(request: Request) {
     }
 
     if (watchParam) {
-      const watchTickers = watchParam
-        .split(",")
-        .map((t) => t.trim().toUpperCase())
-        .filter(Boolean)
-        .slice(0, 15);
-      const watchResults: Record<string, Awaited<ReturnType<typeof fetchTickerChartData>>> = {};
+      const watchTickers = watchParam.split(",").map((t) => t.trim().toUpperCase()).filter(Boolean).slice(0, 15);
+      const watchResults: Record<string, unknown> = {};
       await Promise.all(
         watchTickers.map(async (tk) => {
           const info = await fetchTickerChartData(tk, "1mo", "1d", true, false);
@@ -608,27 +564,26 @@ export async function GET(request: Request) {
     }
 
     if (symbol) {
+      const symCacheKey = `sym-full:${symbol}:${range}`;
       const [chartRes, secData, yahooFallback, stockNews] = await Promise.all([
-        fetch(
-          `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(
-            symbol
-          )}?interval=${interval}&range=${range}`,
-          { headers: { "User-Agent": "Mozilla/5.0" }, cache: "no-store" }
-        ),
+        fetchWithTimeout(
+          `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}`,
+          { headers: { "User-Agent": "Mozilla/5.0" }, cache: "no-store" },
+          5500
+        ).catch(() => null),
         fetchSecOfficialData(symbol),
         fetchYahooFinancialsFallback(symbol),
         fetchYahooNewsByQuery(`${symbol} stock earnings`, 3),
       ]);
 
-      if (!chartRes.ok) {
+      if (!chartRes || !chartRes.ok) {
+        const staleSym = getStaleCache(symCacheKey);
+        if (staleSym) return NextResponse.json(staleSym, { headers: NO_CACHE_HEADERS });
         return NextResponse.json({ error: "ไม่พบข้อมูลหุ้นนี้ในระบบตลาด" }, { status: 404, headers: NO_CACHE_HEADERS });
       }
 
-      const data = await chartRes.json();
-      const result = data?.chart?.result?.[0];
-      if (!result) {
-        return NextResponse.json({ error: "ไม่พบข้อมูลราคาหุ้น" }, { status: 404, headers: NO_CACHE_HEADERS });
-      }
+      const result = (await chartRes.json())?.chart?.result?.[0];
+      if (!result) return NextResponse.json({ error: "ไม่พบข้อมูลราคาหุ้น" }, { status: 404, headers: NO_CACHE_HEADERS });
 
       const meta = result.meta;
       const price = meta.regularMarketPrice;
@@ -647,10 +602,7 @@ export async function GET(request: Request) {
         const cVal = closes[i];
         if (typeof cVal === "number" && isFinite(cVal)) {
           const dt = new Date(timestamps[i] * 1000);
-          const dStr =
-            range === "1d"
-              ? dt.toLocaleTimeString("en-GB", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" })
-              : dt.toISOString().split("T")[0];
+          const dStr = range === "1d" ? dt.toLocaleTimeString("en-GB", { timeZone: "America/New_York", hour: "2-digit", minute: "2-digit" }) : dt.toISOString().split("T")[0];
           const oVal = typeof opens[i] === "number" && isFinite(opens[i]!) ? opens[i]! : cVal;
           const hVal = typeof highs[i] === "number" && isFinite(highs[i]!) ? highs[i]! : Math.max(oVal, cVal);
           const lVal = typeof lows[i] === "number" && isFinite(lows[i]!) ? lows[i]! : Math.min(oVal, cVal);
@@ -674,60 +626,40 @@ export async function GET(request: Request) {
         };
       }
 
-      return NextResponse.json(
-        {
-          symbol: meta.symbol,
-          name: meta.longName || meta.shortName || secData?.secFiling?.entityName || meta.symbol,
-          exchange: meta.fullExchangeName || meta.exchangeName || "US Market",
-          currency: meta.currency || "USD",
-          price,
-          prevClose,
-          changePct,
-          updatedAt: new Date().toISOString(),
-          history,
-          summary: mergedSummary,
-          secFiling: secData?.secFiling || null,
-          stockNews,
-        },
-        { headers: NO_CACHE_HEADERS }
-      );
+      const responsePayload = {
+        symbol: meta.symbol,
+        name: meta.longName || meta.shortName || secData?.secFiling?.entityName || meta.symbol,
+        exchange: meta.fullExchangeName || meta.exchangeName || "US Market",
+        currency: meta.currency || "USD",
+        price,
+        prevClose,
+        changePct,
+        updatedAt: new Date().toISOString(),
+        history,
+        summary: mergedSummary,
+        secFiling: secData?.secFiling || null,
+        stockNews,
+      };
+      setCache(symCacheKey, responsePayload, 90 * 1000);
+      return NextResponse.json(responsePayload, { headers: NO_CACHE_HEADERS });
     }
+
+    const overviewCacheKey = "market:overview:all";
+    const freshOverview = getFreshCache(overviewCacheKey);
+    if (freshOverview) return NextResponse.json(freshOverview, { headers: NO_CACHE_HEADERS });
 
     const usCoreTickers = ["^DJI", "^GSPC", "^IXIC", "^RUT", "^VIX"];
     const globalTickers = ["000001.SS", "^HSI", "^KS11", "^N225", "^SET.BK", "^STOXX50E"];
     const sectorTickers = ["XLK", "XLF", "XLI", "XLC", "XLV", "XLU", "XLP", "XLRE", "XLB", "XLY", "XLE"];
     const macroAndSafeHavenTickers = ["TLT", "SHV", "GLD", "DX-Y.NYB", "^TNX", "^IRX", "CL=F"];
-
-    const results: Record<string, Awaited<ReturnType<typeof fetchTickerChartData>>> = {};
+    const results: Record<string, unknown> = {};
 
     const [, , , , , news, fred10y, fred3m, fredSpread, fredWti] = await Promise.all([
-      Promise.all(
-        usCoreTickers.map(async (tk) => {
-          const info = await fetchTickerChartData(tk, "1mo", "1d", true, false);
-          if (info) results[tk] = info;
-        })
-      ),
-      fetchTickerChartData("^GSPC", "3mo", "1d", false, true).then((info) => {
-        if (info) results["^GSPC_3M"] = info;
-      }),
-      Promise.all(
-        globalTickers.map(async (tk) => {
-          const info = await fetchTickerChartData(tk, "1mo", "1d", true, false);
-          if (info) results[tk] = info;
-        })
-      ),
-      Promise.all(
-        sectorTickers.map(async (tk) => {
-          const info = await fetchTickerChartData(tk, "3mo", "1d", false, true);
-          if (info) results[tk] = info;
-        })
-      ),
-      Promise.all(
-        macroAndSafeHavenTickers.map(async (tk) => {
-          const info = await fetchTickerChartData(tk, "5d", "1d", false, false);
-          if (info) results[tk] = info;
-        })
-      ),
+      Promise.all(usCoreTickers.map(async (tk) => { const info = await fetchTickerChartData(tk, "1mo", "1d", true, false); if (info) results[tk] = info; })),
+      fetchTickerChartData("^GSPC", "3mo", "1d", false, true).then((info) => { if (info) results["^GSPC_3M"] = info; }),
+      Promise.all(globalTickers.map(async (tk) => { const info = await fetchTickerChartData(tk, "1mo", "1d", true, false); if (info) results[tk] = info; })),
+      Promise.all(sectorTickers.map(async (tk) => { const info = await fetchTickerChartData(tk, "3mo", "1d", false, true); if (info) results[tk] = info; })),
+      Promise.all(macroAndSafeHavenTickers.map(async (tk) => { const info = await fetchTickerChartData(tk, "5d", "1d", false, false); if (info) results[tk] = info; })),
       fetchYahooNewsByQuery("stock market federal reserve wall street", 3),
       fetchFredSeries("DGS10"),
       fetchFredSeries("DGS3MO"),
@@ -735,21 +667,17 @@ export async function GET(request: Request) {
       fetchFredSeries("DCOILWTICO"),
     ]);
 
-    return NextResponse.json(
-      {
-        market: results,
-        fred: {
-          DGS10: fred10y,
-          DGS3MO: fred3m,
-          T10Y3M: fredSpread,
-          DCOILWTICO: fredWti,
-        },
-        news,
-        retrievedAt: new Date().toISOString(),
-      },
-      { headers: NO_CACHE_HEADERS }
-    );
+    const overviewPayload = {
+      market: results,
+      fred: { DGS10: fred10y, DGS3MO: fred3m, T10Y3M: fredSpread, DCOILWTICO: fredWti },
+      news,
+      retrievedAt: new Date().toISOString(),
+    };
+    setCache(overviewCacheKey, overviewPayload, 60 * 1000);
+    return NextResponse.json(overviewPayload, { headers: NO_CACHE_HEADERS });
   } catch {
+    const staleOverview = getStaleCache("market:overview:all");
+    if (staleOverview) return NextResponse.json(staleOverview, { headers: NO_CACHE_HEADERS });
     return NextResponse.json({ error: "เกิดข้อผิดพลาดในการเชื่อมต่อข้อมูลตลาด" }, { status: 500, headers: NO_CACHE_HEADERS });
   }
 }
