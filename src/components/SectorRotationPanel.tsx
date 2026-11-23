@@ -380,6 +380,8 @@ export default function SectorRotationPanel({
   onSelectStock?: (ticker: string) => void;
 }) {
   const [selectedSectorEtf, setSelectedSectorEtf] = useState<string | null>(null);
+  const [quadrantFilter, setQuadrantFilter] = useState<"ALL" | QuadrantName>("ALL");
+  const [flowPeriodFilter, setFlowPeriodFilter] = useState<"5d" | "1d">("5d");
   const [sectorViewTab, setSectorViewTab] = useState<"rrg" | "flow" | "macro">("rrg");
   const [sectorNews, setSectorNews] = useState<SectorNewsItem[]>([]);
   const [isLoadingNews, setIsLoadingNews] = useState(false);
@@ -408,19 +410,28 @@ export default function SectorRotationPanel({
     return () => {
       cancelled = true;
     };
-  }, [activeNode?.etf]);
+  }, [activeNode]);
 
   const sectorFlows = SECTOR_PROFILES.map((p) => {
     const live = liveMarket[p.etf];
+    const metricVal = live ? (flowPeriodFilter === "5d" ? live.change5dPct : live.changePct) : 0;
     return {
-      secName: p.secName, etf: p.etf, hasData: !!live,
-      price: live ? live.price : 0, etfChange: live ? live.changePct : 0, change5dPct: live ? live.change5dPct : 0,
+      secName: p.secName,
+      etf: p.etf,
+      hasData: !!live,
+      price: live ? live.price : 0,
+      etfChange: live ? live.changePct : 0,
+      change5dPct: live ? live.change5dPct : 0,
+      metricVal,
     };
   });
 
-  const inflowSectors = [...sectorFlows].filter((s) => s.hasData && s.change5dPct >= 0).sort((a, b) => b.change5dPct - a.change5dPct);
-  const outflowSectors = [...sectorFlows].filter((s) => s.hasData && s.change5dPct < 0).sort((a, b) => a.change5dPct - b.change5dPct);
-  const maxFlowAbs = Math.max(...sectorFlows.map((s) => Math.abs(s.change5dPct)), 1);
+  const topLeader = [...sectorFlows].filter((s) => s.hasData).sort((a, b) => b.change5dPct - a.change5dPct)[0];
+  const inflow5dCount = sectorFlows.filter((s) => s.hasData && s.change5dPct >= 0).length;
+
+  const inflowSectors = [...sectorFlows].filter((s) => s.hasData && s.metricVal >= 0).sort((a, b) => b.metricVal - a.metricVal);
+  const outflowSectors = [...sectorFlows].filter((s) => s.hasData && s.metricVal < 0).sort((a, b) => a.metricVal - b.metricVal);
+  const maxFlowAbs = Math.max(...sectorFlows.map((s) => Math.abs(s.metricVal)), 1);
 
   const macroCycleState = useMemo(() => {
     const dgs10 = fred?.DGS10, dgs3m = fred?.DGS3MO, t10y3m = fred?.T10Y3M, wti = fred?.DCOILWTICO;
@@ -433,16 +444,15 @@ export default function SectorRotationPanel({
     const oilVal = wti ? wti.value : oilFallback?.price ?? null;
     const oilDate = wti ? wti.date : oilFallback?.date ?? "";
 
-    const topSector = [...sectorFlows].filter((s) => s.hasData).sort((a, b) => b.change5dPct - a.change5dPct)[0];
     let activeStageId = "expansion";
-    if (inflowSectors.length <= 2) activeStageId = "recession";
-    else if (topSector) {
-      if (["XLE", "XLB"].includes(topSector.etf)) activeStageId = "late";
-      else if (["XLP", "XLU", "XLV"].includes(topSector.etf)) activeStageId = "recession";
-      else if (["XLF", "XLY", "XLRE"].includes(topSector.etf)) activeStageId = "recovery";
+    if (inflow5dCount <= 2) activeStageId = "recession";
+    else if (topLeader) {
+      if (["XLE", "XLB"].includes(topLeader.etf)) activeStageId = "late";
+      else if (["XLP", "XLU", "XLV"].includes(topLeader.etf)) activeStageId = "recession";
+      else if (["XLF", "XLY", "XLRE"].includes(topLeader.etf)) activeStageId = "recovery";
     }
     return { y10, y10Date, y3m, spread, oilVal, oilDate, activeStageId };
-  }, [fred, liveMarket, sectorFlows, inflowSectors.length]);
+  }, [fred, liveMarket, inflow5dCount, topLeader]);
 
   const safeHavenAnalysis = useMemo(() => {
     const items = SAFE_HAVEN_ASSETS.map((a) => {
@@ -460,7 +470,7 @@ export default function SectorRotationPanel({
     const headline =
       leader && leader.change5d > 0
         ? `เงินทุน 5D ไหลเข้า ${leader.name} (${leader.id} 5D: ${sg(leader.change5d, 2)})`
-        : "หุ้นทั้ง 11 Sector ปรับตัวลดลงพร้อมกันในรอบ 5 วัน";
+        : "หุ้นทั้ง 11 Sector ปรับตัวลดลงพร้อมกันในรอบช่วงเวลานี้";
     return { items, headline };
   }, [liveMarket]);
 
@@ -469,76 +479,131 @@ export default function SectorRotationPanel({
 
   const sp5d = liveMarket["^GSPC_3M"]?.change5dPct ?? liveMarket["^GSPC"]?.change5dPct ?? 0;
 
+  const quadrantCards = [
+    { key: "Improving" as const, title: "Improving · ฟื้นตัว", dot: "bg-blue-500", badge: "hover:bg-blue-600" },
+    { key: "Leading" as const, title: "Leading · ผู้นำตลาด", dot: "bg-emerald-500", badge: "hover:bg-[#064e3b]" },
+    { key: "Lagging" as const, title: "Lagging · อ่อนแอ", dot: "bg-rose-500", badge: "hover:bg-rose-600" },
+    { key: "Weakening" as const, title: "Weakening · เริ่มแผ่ว", dot: "bg-amber-500", badge: "hover:bg-amber-600" },
+  ].filter((q) => quadrantFilter === "ALL" || q.key === quadrantFilter);
+
   return (
-    <section className="fintech-card rounded-3xl p-6 md:p-8 space-y-6">
-      {/* Clean Editorial Header (No Heavy Solid Block) */}
-      <div className="flex flex-wrap justify-between items-start gap-4 pb-5 border-b border-[#e5efe9]">
+    <section className="fintech-card rounded-3xl p-6 md:p-8 space-y-5">
+      {/* Executive Header + 4 Crisp KPI Pills */}
+      <div className="flex flex-wrap justify-between items-start gap-4 pb-4 border-b border-[#e5efe9]">
         <div>
-          <div className="flex items-center gap-2.5 flex-wrap">
+          <div className="flex items-center gap-2 flex-wrap">
             <span className="text-[11px] font-extrabold uppercase tracking-wider text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-full">
-              Sector & Macro Intelligence
+              Sector & Macro KPIs
             </span>
             {selectedSectorEtf && (
               <button
                 type="button"
                 onClick={() => setSelectedSectorEtf(null)}
-                className="text-xs bg-[#064e3b] text-white px-3 py-0.5 rounded-full font-bold transition hover:bg-emerald-800"
+                className="text-xs bg-[#064e3b] text-white px-3 py-0.5 rounded-full font-bold transition"
               >
                 ← ดูทั้ง 11 กลุ่ม
               </button>
             )}
           </div>
-          <h3 className="font-display text-xl md:text-2xl font-extrabold text-[#091e16] mt-2">
+          <h3 className="font-display text-xl md:text-2xl font-extrabold text-[#091e16] mt-1.5">
             การหมุนเวียน 11 กลุ่ม Sector & วัฏจักร Macro
           </h3>
-          <p className="text-xs text-slate-500 mt-0.5">
-            NYSE Arca Sector ETFs · S&P 500 Benchmark · Federal Reserve (FRED)
-          </p>
         </div>
 
-        {/* Minimalist Telemetry Pills */}
+        {/* 4 Actionable KPI Telemetry Pills */}
         <div className="flex flex-wrap items-center gap-2 text-xs">
-          <a href="https://fred.stlouisfed.org/series/DGS10" target="_blank" rel="noopener noreferrer" className="bg-[#f6faf8] hover:bg-emerald-50 px-3.5 py-2 rounded-2xl border border-[#dfece5] text-[#091e16] transition">
-            <span className="text-slate-500">US 10Y</span> <b className="num text-sm text-[#064e3b] ml-1">{macroCycleState.y10 !== null ? `${macroCycleState.y10.toFixed(2)}%` : "–"}</b>
-          </a>
-          <a href="https://fred.stlouisfed.org/series/T10Y3M" target="_blank" rel="noopener noreferrer" className="bg-[#f6faf8] hover:bg-emerald-50 px-3.5 py-2 rounded-2xl border border-[#dfece5] text-[#091e16] transition">
-            <span className="text-slate-500">10Y-3M</span> <b className="num text-sm text-[#064e3b] ml-1">{macroCycleState.spread !== null ? `${macroCycleState.spread >= 0 ? "+" : ""}${macroCycleState.spread.toFixed(2)}%` : "–"}</b>
-          </a>
-          <div className="bg-emerald-50 border border-emerald-200 text-[#064e3b] px-3.5 py-2 rounded-2xl font-bold">
-            5D Inflow <b className="num text-sm ml-1">{inflowSectors.length}/11</b>
+          {topLeader && (
+            <button
+              type="button"
+              onClick={() => { setSectorViewTab("rrg"); setSelectedSectorEtf(topLeader.etf); }}
+              className="bg-emerald-50 border border-emerald-200 text-[#064e3b] px-3.5 py-2 rounded-2xl font-bold"
+            >
+              กลุ่มนำ 5D: <b className="num ml-1">{topLeader.etf} ({sg(topLeader.change5dPct, 2)})</b>
+            </button>
+          )}
+          <div className="bg-[#f6faf8] border border-[#dfece5] text-[#091e16] px-3.5 py-2 rounded-2xl font-bold">
+            5D Inflow: <b className="num text-[#064e3b] ml-1">{inflow5dCount}/11</b>
           </div>
+          <a href="https://fred.stlouisfed.org/series/DGS10" target="_blank" rel="noopener noreferrer" className="bg-[#f6faf8] px-3.5 py-2 rounded-2xl border border-[#dfece5] text-[#091e16]">
+            US 10Y: <b className="num text-[#064e3b] ml-1">{macroCycleState.y10 !== null ? `${macroCycleState.y10.toFixed(2)}%` : "–"}</b>
+          </a>
+          <a href="https://fred.stlouisfed.org/series/T10Y3M" target="_blank" rel="noopener noreferrer" className="bg-[#f6faf8] px-3.5 py-2 rounded-2xl border border-[#dfece5] text-[#091e16]">
+            10Y-3M: <b className="num text-[#064e3b] ml-1">{macroCycleState.spread !== null ? `${macroCycleState.spread >= 0 ? "+" : ""}${macroCycleState.spread.toFixed(2)}%` : "–"}</b>
+          </a>
         </div>
       </div>
 
-      {/* Sleek Segmented Control */}
-      <div className="inline-flex p-1 rounded-2xl bg-[#f1f6f3] border border-[#dfece5] flex-wrap gap-1">
-        <button
-          type="button"
-          onClick={() => setSectorViewTab("rrg")}
-          className={`px-4 py-2 rounded-xl text-xs md:text-sm font-bold transition ${sectorViewTab === "rrg" ? "bg-white text-[#064e3b] shadow-xs border border-[#dfece5]" : "text-slate-600 hover:text-[#091e16]"}`}
-        >
-          1. กราฟหมุนเวียน RRG 4 ทิศ
-        </button>
-        <button
-          type="button"
-          onClick={() => setSectorViewTab("flow")}
-          className={`px-4 py-2 rounded-xl text-xs md:text-sm font-bold transition ${sectorViewTab === "flow" ? "bg-white text-[#064e3b] shadow-xs border border-[#dfece5]" : "text-slate-600 hover:text-[#091e16]"}`}
-        >
-          2. กระแสเงินทุน 5 วัน ({inflowSectors.length > 0 ? `เข้า ${inflowSectors.length} / ออก ${outflowSectors.length}` : "สินทรัพย์ปลอดภัย"})
-        </button>
-        <button
-          type="button"
-          onClick={() => setSectorViewTab("macro")}
-          className={`px-4 py-2 rounded-xl text-xs md:text-sm font-bold transition ${sectorViewTab === "macro" ? "bg-white text-[#064e3b] shadow-xs border border-[#dfece5]" : "text-slate-600 hover:text-[#091e16]"}`}
-        >
-          3. ดอกเบี้ย FRED & วัฏจักรเศรษฐกิจ
-        </button>
+      {/* Main View Tabs */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="inline-flex p-1 rounded-2xl bg-[#f1f6f3] border border-[#dfece5] flex-wrap gap-1">
+          <button
+            type="button"
+            onClick={() => setSectorViewTab("rrg")}
+            className={`px-4 py-2 rounded-xl text-xs md:text-sm font-bold transition ${sectorViewTab === "rrg" ? "bg-white text-[#064e3b] shadow-2xs border border-[#dfece5]" : "text-slate-600 hover:text-[#091e16]"}`}
+          >
+            1. กราฟหมุนเวียน RRG
+          </button>
+          <button
+            type="button"
+            onClick={() => setSectorViewTab("flow")}
+            className={`px-4 py-2 rounded-xl text-xs md:text-sm font-bold transition ${sectorViewTab === "flow" ? "bg-white text-[#064e3b] shadow-2xs border border-[#dfece5]" : "text-slate-600 hover:text-[#091e16]"}`}
+          >
+            2. กระแสเงินทุน ({inflowSectors.length > 0 ? `เข้า ${inflowSectors.length} / ออก ${outflowSectors.length}` : "สินทรัพย์ปลอดภัย"})
+          </button>
+          <button
+            type="button"
+            onClick={() => setSectorViewTab("macro")}
+            className={`px-4 py-2 rounded-xl text-xs md:text-sm font-bold transition ${sectorViewTab === "macro" ? "bg-white text-[#064e3b] shadow-2xs border border-[#dfece5]" : "text-slate-600 hover:text-[#091e16]"}`}
+          >
+            3. ดอกเบี้ย FRED & วัฏจักรเศรษฐกิจ
+          </button>
+        </div>
+
+        {/* Context Filter Bar (Changes cleanly per active tab) */}
+        {sectorViewTab === "rrg" && !selectedSectorEtf && (
+          <div className="flex items-center gap-1.5 flex-wrap text-xs">
+            <span className="text-slate-400 font-semibold mr-0.5">กรองทิศทาง:</span>
+            {(["ALL", "Leading", "Improving", "Weakening", "Lagging"] as const).map((qKey) => (
+              <button
+                key={qKey}
+                type="button"
+                onClick={() => setQuadrantFilter(qKey)}
+                className={`px-3 py-1 rounded-full font-bold border transition ${
+                  quadrantFilter === qKey
+                    ? "bg-[#064e3b] text-white border-[#064e3b]"
+                    : "bg-white text-slate-600 border-[#dfece5]"
+                }`}
+              >
+                {qKey === "ALL" ? "ทั้งหมด (11)" : qKey}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {sectorViewTab === "flow" && (
+          <div className="flex items-center gap-1 bg-[#f1f6f3] p-1 rounded-full border border-[#dfece5] text-xs">
+            <button
+              type="button"
+              onClick={() => setFlowPeriodFilter("5d")}
+              className={`px-3 py-1 rounded-full font-bold transition ${flowPeriodFilter === "5d" ? "bg-[#064e3b] text-white" : "text-slate-600"}`}
+            >
+              รอบ 5 วัน (5D)
+            </button>
+            <button
+              type="button"
+              onClick={() => setFlowPeriodFilter("1d")}
+              className={`px-3 py-1 rounded-full font-bold transition ${flowPeriodFilter === "1d" ? "bg-[#064e3b] text-white" : "text-slate-600"}`}
+            >
+              วันนี้ (1D)
+            </button>
+          </div>
+        )}
       </div>
 
-      {/* TAB 1: MODERN RRG & SECTOR DOSSIER */}
+      {/* TAB 1: RRG & SECTOR DOSSIER */}
       {sectorViewTab === "rrg" && (
         <div className="grid xl:grid-cols-[1.35fr_1.15fr] gap-8 items-start">
-          <div className="space-y-2.5">
+          <div className="space-y-2">
             <div className="flex justify-between items-center text-xs text-slate-500 px-1">
               <span>Relative Rotation Graph (เทียบ S&P 500 ย้อนหลัง 4 สัปดาห์)</span>
               <span>จุดเล็ก = 3 สัปดาห์ก่อน → จุดใหญ่ = ล่าสุด</span>
@@ -574,12 +639,13 @@ export default function SectorRotationPanel({
                   {rrgNodes.map((node) => {
                     const qColor = node.quadrant === "Leading" ? "#10b981" : node.quadrant === "Improving" ? "#3b82f6" : node.quadrant === "Weakening" ? "#f59e0b" : "#f43f5e";
                     const isSelected = selectedSectorEtf === node.etf;
-                    const isDimmed = selectedSectorEtf !== null && !isSelected;
+                    const matchesFilter = quadrantFilter === "ALL" || node.quadrant === quadrantFilter;
+                    const isDimmed = (selectedSectorEtf !== null && !isSelected) || (selectedSectorEtf === null && !matchesFilter);
                     const svgPts = node.trail.map((p) => ({ x: toSvgX(p.rsRatio), y: toSvgY(p.rsMom) }));
                     const smoothD = buildSmoothPath(svgPts);
 
                     return (
-                      <g key={`tail-${node.etf}`} style={{ opacity: isDimmed ? 0.14 : 1 }} className="transition-opacity duration-200">
+                      <g key={`tail-${node.etf}`} style={{ opacity: isDimmed ? 0.12 : 1 }} className="transition-opacity duration-200">
                         <path d={smoothD} fill="none" stroke={qColor} strokeWidth={isSelected ? "3.2" : "1.8"} strokeLinecap="round" opacity={isSelected ? 1 : 0.72} />
                         {svgPts.slice(0, -1).map((pt, idx) => (
                           <circle key={idx} cx={pt.x} cy={pt.y} r={isSelected ? 3.5 : 2.2} fill={qColor} opacity={0.55 + idx * 0.2} />
@@ -591,7 +657,8 @@ export default function SectorRotationPanel({
                   {rrgNodes.map((node) => {
                     const qColor = node.quadrant === "Leading" ? "#10b981" : node.quadrant === "Improving" ? "#3b82f6" : node.quadrant === "Weakening" ? "#f59e0b" : "#f43f5e";
                     const isSelected = selectedSectorEtf === node.etf;
-                    const isDimmed = selectedSectorEtf !== null && !isSelected;
+                    const matchesFilter = quadrantFilter === "ALL" || node.quadrant === quadrantFilter;
+                    const isDimmed = (selectedSectorEtf !== null && !isSelected) || (selectedSectorEtf === null && !matchesFilter);
                     const dist = Math.hypot(node.labelX - node.svgX, node.labelY - node.svgY);
 
                     return (
@@ -599,7 +666,7 @@ export default function SectorRotationPanel({
                         key={`node-${node.etf}`}
                         onClick={() => setSelectedSectorEtf(isSelected ? null : node.etf)}
                         className="cursor-pointer transition-opacity duration-200"
-                        style={{ opacity: isDimmed ? 0.25 : 1 }}
+                        style={{ opacity: isDimmed ? 0.2 : 1 }}
                       >
                         {dist > 14 && (
                           <line
@@ -624,7 +691,7 @@ export default function SectorRotationPanel({
             </div>
           </div>
 
-          {/* Right Column: Clean Fintech Sector Dossier */}
+          {/* Right Column: Sector Dossier or Filtered Quadrant Cards */}
           <div className="space-y-4">
             {activeNode ? (() => {
               const qAdv = QUADRANT_ADVICE[activeNode.quadrant];
@@ -647,7 +714,7 @@ export default function SectorRotationPanel({
                       href={`https://finance.yahoo.com/quote/${encodeURIComponent(activeNode.etf)}`}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-xs text-[#064e3b] hover:bg-emerald-50 border border-[#dfece5] bg-white px-3 py-1.5 rounded-xl font-bold transition shrink-0"
+                      className="text-xs text-[#064e3b] border border-[#dfece5] bg-white px-3 py-1.5 rounded-xl font-bold shrink-0"
                     >
                       NYSE Arca ↗
                     </a>
@@ -693,7 +760,7 @@ export default function SectorRotationPanel({
                           key={tk}
                           type="button"
                           onClick={() => onSelectStock?.(tk)}
-                          className="num text-xs font-bold px-2.5 py-1 rounded-xl bg-[#f1f6f3] hover:bg-[#064e3b] text-[#064e3b] hover:text-white transition"
+                          className="num text-xs font-bold px-2.5 py-1 rounded-xl bg-[#f1f6f3] text-[#064e3b]"
                         >
                           {tk} ↗
                         </button>
@@ -717,7 +784,7 @@ export default function SectorRotationPanel({
                             href={n.link}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="block p-3 rounded-2xl bg-white hover:bg-emerald-50/50 border border-[#e5efe9] transition"
+                            className="block p-3 rounded-2xl bg-white border border-[#e5efe9]"
                           >
                             <div className="text-xs font-bold text-[#091e16] line-clamp-2 leading-snug">{n.title}</div>
                             <span className="text-[11px] text-emerald-700 font-semibold mt-1 block">{n.publisher} ↗</span>
@@ -729,32 +796,30 @@ export default function SectorRotationPanel({
                 </div>
               );
             })() : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                {([
-                  { key: "Improving", title: "Improving · ฟื้นตัว", dot: "bg-blue-500", badge: "hover:bg-blue-600" },
-                  { key: "Leading", title: "Leading · ผู้นำตลาด", dot: "bg-emerald-500", badge: "hover:bg-[#064e3b]" },
-                  { key: "Lagging", title: "Lagging · อ่อนแอ", dot: "bg-rose-500", badge: "hover:bg-rose-600" },
-                  { key: "Weakening", title: "Weakening · เริ่มแผ่ว", dot: "bg-amber-500", badge: "hover:bg-amber-600" },
-                ] as const).map((qBox) => {
+              <div className={`grid gap-3.5 ${quadrantFilter === "ALL" ? "grid-cols-1 sm:grid-cols-2" : "grid-cols-1"}`}>
+                {quadrantCards.map((qBox) => {
                   const list = rrgNodes.filter((n) => n.quadrant === qBox.key);
                   return (
                     <div key={qBox.key} className="bg-[#f9fcfa] rounded-2xl p-4 border border-[#e5efe9] space-y-3">
-                      <div className="flex items-center gap-2 text-xs md:text-sm font-bold text-[#091e16]">
-                        <span className={`w-2 h-2 rounded-full ${qBox.dot}`} />
-                        <span>{qBox.title}</span>
+                      <div className="flex items-center justify-between text-xs md:text-sm font-bold text-[#091e16]">
+                        <span className="inline-flex items-center gap-2">
+                          <span className={`w-2 h-2 rounded-full ${qBox.dot}`} />
+                          <span>{qBox.title}</span>
+                        </span>
+                        <span className="num text-xs text-slate-400">{list.length} กลุ่ม</span>
                       </div>
                       <div className="flex flex-wrap gap-2">
                         {list.length === 0 ? (
-                          <span className="text-xs text-slate-400">—</span>
+                          <span className="text-xs text-slate-400">— ไม่มีกลุ่มในโซนนี้ —</span>
                         ) : (
                           list.map((item) => (
                             <button
                               key={item.etf}
                               type="button"
                               onClick={() => setSelectedSectorEtf(item.etf)}
-                              className={`text-xs font-bold px-3 py-1.5 rounded-xl bg-white text-[#091e16] hover:text-white border border-[#dfece5] transition ${qBox.badge}`}
+                              className={`text-xs font-bold px-3 py-1.5 rounded-xl bg-white text-[#091e16] border border-[#dfece5] ${qBox.badge}`}
                             >
-                              {item.etf} · {item.secName}
+                              {item.etf} · {item.secName} ({sg(item.change5d, 1)})
                             </button>
                           ))
                         )}
@@ -764,30 +829,34 @@ export default function SectorRotationPanel({
                 })}
               </div>
             )}
-            <p className="text-xs text-slate-400 px-1">
-              คลิกที่จุดบนกราฟหรือป้ายชื่อ ETF เพื่ออ่านคำอธิบายเชิงลึกและหุ้นแกนนำ
-            </p>
           </div>
         </div>
       )}
 
-      {/* TAB 2: MONEY FLOW */}
+      {/* TAB 2: MONEY FLOW WITH PERIOD FILTER */}
       {sectorViewTab === "flow" && (
         <div className="grid lg:grid-cols-2 gap-6 items-start">
           {inflowSectors.length > 0 ? (
             <div className="bg-[#f9fcfa] border border-[#e5efe9] rounded-2xl p-5 space-y-3">
-              <h4 className="font-display font-bold text-[#091e16] text-base">กระแสเงินไหลเข้า 5 วัน ({inflowSectors.length} กลุ่ม)</h4>
+              <h4 className="font-display font-bold text-[#091e16] text-base">
+                กระแสเงินไหลเข้า {flowPeriodFilter.toUpperCase()} ({inflowSectors.length} กลุ่ม)
+              </h4>
               <div className="space-y-2.5">
                 {inflowSectors.map((sec) => {
-                  const barPct = Math.max(8, Math.round((Math.abs(sec.change5dPct) / maxFlowAbs) * 100));
+                  const barPct = Math.max(8, Math.round((Math.abs(sec.metricVal) / maxFlowAbs) * 100));
                   return (
-                    <div key={sec.etf} className="bg-white rounded-2xl p-3.5 border border-[#e5efe9]">
+                    <button
+                      key={sec.etf}
+                      type="button"
+                      onClick={() => { setSectorViewTab("rrg"); setSelectedSectorEtf(sec.etf); }}
+                      className="w-full text-left bg-white rounded-2xl p-3.5 border border-[#e5efe9]"
+                    >
                       <div className="flex justify-between items-center text-xs md:text-sm mb-1.5">
                         <span className="font-bold text-[#091e16]">{sec.etf} · {sec.secName}</span>
-                        <span className="num font-extrabold text-emerald-600">5D: {sg(sec.change5dPct, 2)}</span>
+                        <span className="num font-extrabold text-emerald-600">{flowPeriodFilter.toUpperCase()}: {sg(sec.metricVal, 2)}</span>
                       </div>
                       <div className="h-1.5 bg-emerald-50 rounded-full overflow-hidden"><div className="h-full rounded-full bg-emerald-500" style={{ width: `${barPct}%` }} /></div>
-                    </div>
+                    </button>
                   );
                 })}
               </div>
@@ -795,25 +864,23 @@ export default function SectorRotationPanel({
           ) : (
             <div className="fintech-hero-gradient text-white rounded-2xl p-6 space-y-4">
               <div>
-                <span className="text-xs font-bold text-emerald-300">หุ้นทั้ง 11 กลุ่มติดลบในรอบ 5 วัน (0 Inflow)</span>
+                <span className="text-xs font-bold text-emerald-300">หุ้นทั้ง 11 กลุ่มติดลบในช่วงนี้ (0 Inflow)</span>
                 <h4 className="font-display text-lg font-bold text-white mt-1">{safeHavenAnalysis.headline}</h4>
               </div>
               <div className="grid sm:grid-cols-2 gap-3">
                 {safeHavenAnalysis.items.map((asset) => {
-                  const isPos5d = asset.change5d >= 0;
+                  const val = flowPeriodFilter === "5d" ? asset.change5d : asset.change1d;
+                  const isPos = val >= 0;
                   return (
-                    <a key={asset.id} href={asset.sourceUrl} target="_blank" rel="noopener noreferrer" className="block rounded-2xl p-3.5 bg-white text-[#091e16] hover:bg-emerald-50 transition">
+                    <a key={asset.id} href={asset.sourceUrl} target="_blank" rel="noopener noreferrer" className="block rounded-2xl p-3.5 bg-white text-[#091e16]">
                       <div className="flex justify-between items-center text-xs md:text-sm">
                         <b>{asset.name}</b>
-                        <span className={`num font-extrabold ${isPos5d ? "text-emerald-600" : "text-rose-600"}`}>
-                          5D: {asset.hasData ? sg(asset.change5d, 2) : "–"}
+                        <span className={`num font-extrabold ${isPos ? "text-emerald-600" : "text-rose-600"}`}>
+                          {flowPeriodFilter.toUpperCase()}: {asset.hasData ? sg(val, 2) : "–"}
                         </span>
                       </div>
-                      <div className="flex justify-between items-center text-[11px] text-slate-500 mt-1 num">
-                        <span>{asset.id} · ${fmtN(asset.price, 2)}</span>
-                        <span className={asset.change1d >= 0 ? "text-emerald-600 font-semibold" : "text-rose-600 font-semibold"}>
-                          1D: {asset.hasData ? sg(asset.change1d, 2) : "–"}
-                        </span>
+                      <div className="text-[11px] text-slate-500 mt-1 num">
+                        {asset.id} · ${fmtN(asset.price, 2)}
                       </div>
                     </a>
                   );
@@ -823,18 +890,25 @@ export default function SectorRotationPanel({
           )}
 
           <div className="bg-[#f9fcfa] border border-[#e5efe9] rounded-2xl p-5 space-y-3">
-            <h4 className="font-display font-bold text-[#091e16] text-base">กระแสเงินไหลออก 5 วัน ({outflowSectors.length} กลุ่ม)</h4>
+            <h4 className="font-display font-bold text-[#091e16] text-base">
+              กระแสเงินไหลออก {flowPeriodFilter.toUpperCase()} ({outflowSectors.length} กลุ่ม)
+            </h4>
             <div className="grid sm:grid-cols-2 gap-2.5">
               {outflowSectors.map((sec) => {
-                const barPct = Math.max(8, Math.round((Math.abs(sec.change5dPct) / maxFlowAbs) * 100));
+                const barPct = Math.max(8, Math.round((Math.abs(sec.metricVal) / maxFlowAbs) * 100));
                 return (
-                  <div key={sec.etf} className="bg-white rounded-2xl p-3.5 border border-[#e5efe9]">
+                  <button
+                    key={sec.etf}
+                    type="button"
+                    onClick={() => { setSectorViewTab("rrg"); setSelectedSectorEtf(sec.etf); }}
+                    className="w-full text-left bg-white rounded-2xl p-3.5 border border-[#e5efe9]"
+                  >
                     <div className="flex justify-between items-center text-xs md:text-sm mb-1.5">
                       <span className="font-bold text-[#091e16] truncate">{sec.etf} · {sec.secName}</span>
-                      <span className="num font-extrabold text-rose-600">5D: {sg(sec.change5dPct, 2)}</span>
+                      <span className="num font-extrabold text-rose-600">{flowPeriodFilter.toUpperCase()}: {sg(sec.metricVal, 2)}</span>
                     </div>
                     <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden"><div className="h-full rounded-full bg-rose-500" style={{ width: `${barPct}%` }} /></div>
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -846,22 +920,22 @@ export default function SectorRotationPanel({
       {sectorViewTab === "macro" && (
         <div className="space-y-4">
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
-            <a href="https://fred.stlouisfed.org/series/DGS10" target="_blank" rel="noopener noreferrer" className="bg-[#f9fcfa] hover:border-emerald-400 border border-[#e5efe9] rounded-2xl p-4 block transition">
+            <a href="https://fred.stlouisfed.org/series/DGS10" target="_blank" rel="noopener noreferrer" className="bg-[#f9fcfa] border border-[#e5efe9] rounded-2xl p-4 block">
               <small className="text-xs text-slate-500 block">US 10-Year Treasury (DGS10)</small>
               <b className="num text-2xl text-[#091e16] block mt-1">{macroCycleState.y10 !== null ? `${macroCycleState.y10.toFixed(2)}%` : "–"}</b>
               <span className="text-[11px] text-emerald-700 font-semibold mt-1 block">FRED · {macroCycleState.y10Date || "ล่าสุด"} ↗</span>
             </a>
-            <a href="https://fred.stlouisfed.org/series/DGS3MO" target="_blank" rel="noopener noreferrer" className="bg-[#f9fcfa] hover:border-emerald-400 border border-[#e5efe9] rounded-2xl p-4 block transition">
+            <a href="https://fred.stlouisfed.org/series/DGS3MO" target="_blank" rel="noopener noreferrer" className="bg-[#f9fcfa] border border-[#e5efe9] rounded-2xl p-4 block">
               <small className="text-xs text-slate-500 block">US 3-Month Treasury (DGS3MO)</small>
               <b className="num text-2xl text-[#091e16] block mt-1">{macroCycleState.y3m !== null ? `${macroCycleState.y3m.toFixed(2)}%` : "–"}</b>
               <span className="text-[11px] text-emerald-700 font-semibold mt-1 block">Federal Reserve Board ↗</span>
             </a>
-            <a href="https://fred.stlouisfed.org/series/T10Y3M" target="_blank" rel="noopener noreferrer" className="bg-[#f9fcfa] hover:border-emerald-400 border border-[#e5efe9] rounded-2xl p-4 block transition">
+            <a href="https://fred.stlouisfed.org/series/T10Y3M" target="_blank" rel="noopener noreferrer" className="bg-[#f9fcfa] border border-[#e5efe9] rounded-2xl p-4 block">
               <small className="text-xs text-slate-500 block">Yield Curve Spread (T10Y3M)</small>
               <b className="num text-2xl text-[#091e16] block mt-1">{macroCycleState.spread !== null ? `${macroCycleState.spread >= 0 ? "+" : ""}${macroCycleState.spread.toFixed(2)}%` : "–"}</b>
               <span className="text-[11px] text-emerald-700 font-semibold mt-1 block">{macroCycleState.spread !== null && macroCycleState.spread < 0 ? "Inverted Curve" : "Normal Curve"} ↗</span>
             </a>
-            <a href="https://fred.stlouisfed.org/series/DCOILWTICO" target="_blank" rel="noopener noreferrer" className="bg-[#f9fcfa] hover:border-emerald-400 border border-[#e5efe9] rounded-2xl p-4 block transition">
+            <a href="https://fred.stlouisfed.org/series/DCOILWTICO" target="_blank" rel="noopener noreferrer" className="bg-[#f9fcfa] border border-[#e5efe9] rounded-2xl p-4 block">
               <small className="text-xs text-slate-500 block">Crude Oil WTI (DCOILWTICO)</small>
               <b className="num text-2xl text-[#091e16] block mt-1">{macroCycleState.oilVal !== null ? `$${macroCycleState.oilVal.toFixed(2)}` : "–"}</b>
               <span className="text-[11px] text-emerald-700 font-semibold mt-1 block">FRED · {macroCycleState.oilDate || "ล่าสุด"} ↗</span>
