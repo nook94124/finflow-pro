@@ -155,16 +155,11 @@ button[class*="bg-[#064e3b]"]:hover::after {
   background-color: #f2efe7 !important;
   border-color: #e4ddd0 !important;
 }
-html.dark body,html.dark main,html.dark [class*='bg-[#f'],html.dark [class*='bg-[#F'],html.dark [class*='bg-[#e'],html.dark [class*='bg-[#E']{background-color:#0b1120!important;color:#f1f5f9!important}
-html.dark .bg-white,html.dark [class*='bg-slate-50'],html.dark [class*='bg-gray-50'],html.dark [class*='bg-zinc-50'],html.dark [class*='bg-neutral-50'],html.dark [class*='bg-stone-50']{background-color:#131c31!important;border-color:#263349!important}
-html.dark [class*='bg-slate-100'],html.dark [class*='bg-gray-100'],html.dark [class*='bg-zinc-100'],html.dark [class*='bg-neutral-100'],html.dark [class*='bg-stone-100']{background-color:#1e293b!important}
-html.dark [class*='bg-blue-50'],html.dark [class*='bg-emerald-50'],html.dark [class*='bg-green-50'],html.dark [class*='bg-rose-50'],html.dark [class*='bg-red-50'],html.dark [class*='bg-amber-50'],html.dark [class*='bg-yellow-50']{background-color:#1a253c!important}
-html.dark [class*='text-slate-9'],html.dark [class*='text-slate-8'],html.dark [class*='text-gray-9'],html.dark [class*='text-gray-8'],html.dark [class*='text-zinc-9'],html.dark [class*='text-zinc-8'],html.dark [class*='text-neutral-9'],html.dark [class*='text-neutral-8'],html.dark [class*='text-stone-9'],html.dark [class*='text-stone-8'],html.dark .text-black{color:#f8fafc!important}
-html.dark [class*='text-slate-7'],html.dark [class*='text-slate-6'],html.dark [class*='text-gray-7'],html.dark [class*='text-gray-6'],html.dark [class*='text-zinc-7'],html.dark [class*='text-zinc-6'],html.dark [class*='text-neutral-7'],html.dark [class*='text-neutral-6'],html.dark [class*='text-stone-7'],html.dark [class*='text-stone-6']{color:#cbd5e1!important}
-html.dark [class*='text-slate-5'],html.dark [class*='text-gray-5'],html.dark [class*='text-zinc-5'],html.dark [class*='text-neutral-5'],html.dark [class*='text-stone-5']{color:#94a3b8!important}
-html.dark [class*='text-emerald-9'],html.dark [class*='text-emerald-8'],html.dark [class*='text-emerald-7'],html.dark [class*='text-green-9'],html.dark [class*='text-green-8'],html.dark [class*='text-green-7']{color:#6ee7b7!important}
-html.dark [class*='text-blue-9'],html.dark [class*='text-blue-8'],html.dark [class*='text-blue-7'],html.dark [class*='text-sky-9'],html.dark [class*='text-sky-8'],html.dark [class*='text-sky-7']{color:#93c5fd!important}
-html.dark [class*='text-rose-9'],html.dark [class*='text-rose-8'],html.dark [class*='text-rose-7'],html.dark [class*='text-red-9'],html.dark [class*='text-red-8'],html.dark [class*='text-red-7']{color:#fda4af!important}
-html.dark [class*='text-amber-9'],html.dark [class*='text-amber-8'],html.dark [class*='text-amber-7'],html.dark [class*='text-yellow-9'],html.dark [class*='text-yellow-8'],html.dark [class*='text-yellow-7']{color:#fcd34d!important}
-html.dark [class*='border-slate-'],html.dark [class*='border-gray-'],html.dark [class*='border-zinc-'],html.dark [class*='border-neutral-'],html.dark [class*='border-stone-'],html.dark [class*='border-[#']{border-color:#263349!important}
-html.dark input{background-color:#0f172a!important;color:#f8fafc!important;border-color:#334155!important}
+html.dark body,html.dark main,html.dark header,html.dark nav,html.dark footer{background-color:#0b1120!important;color:#ffffff!important}
+html.dark [class*='bg-white'],html.dark [class*='bg-[#f'],html.dark [class*='bg-[#F'],html.dark [class*='bg-[#e'],html.dark [class*='bg-[#E'],html.dark [class*='-50'],html.dark [class*='-100'],html.dark div[style*='background'],html.dark section[style*='background']{background-color:#131c31!important}
+html.dark button,html.dark [role='button']{background-color:#1e293b!important}
+html.dark [class*='bg-emerald-7'],html.dark [class*='bg-emerald-8'],html.dark [class*='bg-emerald-9'],html.dark [class*='bg-[#06']{background-color:#065f46!important}
+html.dark body,html.dark h1,html.dark h2,html.dark h3,html.dark h4,html.dark p,html.dark span,html.dark div,html.dark a,html.dark button,html.dark label,html.dark li,html.dark td,html.dark th,html.dark [class*='text-']{color:#ffffff!important}
+html.dark *{border-color:#263349!important}
+html.dark input{background-color:#0f172a!important;color:#ffffff!important;border-color:#475569!important}
+html.dark input::placeholder{color:#94a3b8!important}
