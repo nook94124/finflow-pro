@@ -412,11 +412,7 @@ async function fetchTickerChartData(tk: string, range = "1mo", interval = "1d", 
 
   try {
     const effectiveRange = includeSparkline ? range : "5d";
-    const dailyRes = await fetchWithTimeout(
-      `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(tk)}?interval=${encodeURIComponent(interval)}&range=${encodeURIComponent(effectiveRange)}`,
-      { headers: { "User-Agent": "Mozilla/5.0" }, cache: "no-store" },
-      5000
-    );
+    const qUrl=`/v8/finance/chart/${encodeURIComponent(tk)}?interval=${encodeURIComponent(interval)}&range=${encodeURIComponent(effectiveRange)}`;let dailyRes=await fetchWithTimeout(`https://query1.finance.yahoo.com${qUrl}`,{headers:{"User-Agent":"Mozilla/5.0"},cache:"no-store"},4500).catch(()=>null);if(!dailyRes||!dailyRes.ok)dailyRes=await fetchWithTimeout(`https://query2.finance.yahoo.com${qUrl}`,{headers:{"User-Agent":"Mozilla/5.0"},cache:"no-store"},4500);
     if (!dailyRes.ok) return getStaleCache(cacheKey);
     const d0 = (await dailyRes.json())?.chart?.result?.[0];
     if (!d0) return getStaleCache(cacheKey);
