@@ -12,7 +12,7 @@ export default function AutoRefresh() {
   const triggerManualRefresh = () => {
     setIsRefreshing(true);
     lastRefreshRef.current = Date.now();
-    router.refresh();
+    router.refresh(); window.dispatchEvent(new Event("finflow:refresh"));
     setTimeout(() => setIsRefreshing(false), 800);
   };
 
@@ -38,9 +38,9 @@ export default function AutoRefresh() {
     const interval = setInterval(() => {
       if (document.visibilityState === "visible" && navigator.onLine) {
         lastRefreshRef.current = Date.now();
-        router.refresh();
+        router.refresh(); window.dispatchEvent(new Event("finflow:refresh"));
       }
-    }, 60000);
+    }, 30000);
 
     const handleKeyDown = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;

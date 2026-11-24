@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import SectorRotationPanel, { LiveMarketItem, FredSeriesItem } from "../components/SectorRotationPanel";
 
 const RETRIEVED = new Date().toISOString();
@@ -478,6 +478,7 @@ function PriceChart({
   titleOverride?: string;
 }) {
   const [chartType, setChartType] = useState<"candle" | "bar" | "line" | "area">("candle");
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const ranges = [
     { id: "1d", label: "1D" },
     { id: "1mo", label: "1M" },
@@ -528,6 +529,11 @@ function PriceChart({
 
   const slotW = plotW / history.length;
   const candleW = Math.max(3, Math.min(14, slotW * 0.62));
+  const activeIdx = hoverIdx !== null && hoverIdx >= 0 && hoverIdx < history.length ? hoverIdx : null;
+  const activePt = activeIdx !== null ? history[activeIdx] : history[history.length - 1];
+  const prevPt = activeIdx !== null && activeIdx > 0 ? history[activeIdx - 1] : activeIdx === null && history.length >= 2 ? history[history.length - 2] : null;
+  const aOpen = activePt.open ?? activePt.close, aHigh = activePt.high ?? Math.max(aOpen, activePt.close), aLow = activePt.low ?? Math.min(aOpen, activePt.close), aClose = activePt.close;
+  const aBase = prevPt ? prevPt.close : aOpen, aChg = aBase ? ((aClose - aBase) / aBase) * 100 : 0, aBull = aClose >= aOpen;
 
   return (
     <div className="bg-[#fbfdfc] rounded-2xl p-4 md:p-5 border border-[#e5efe9]">
@@ -587,8 +593,10 @@ function PriceChart({
         </div>
       </div>
 
+      <div className={`flex flex-wrap items-center justify-between gap-2 px-3 py-2 mb-3 rounded-xl border text-xs transition-colors ${activeIdx !== null ? "bg-emerald-50/80 border-emerald-300 shadow-2xs" : "bg-[#f4f8f6] border-[#e2ece7]"}`}><div className="flex items-center gap-2 font-bold text-[#091e16]"><span className={`px-2 py-0.5 rounded-md text-[11px] ${activeIdx !== null ? "bg-[#064e3b] text-white" : "bg-white text-slate-600 border border-[#dfece5]"}`}>{activeIdx !== null ? "แท่งที่ชี้" : "แท่งล่าสุด"}</span><span>{thd(activePt.date)}</span></div><div className="flex flex-wrap items-center gap-x-3.5 gap-y-1 num"><span className="text-slate-500">เปิด: <b className="text-[#091e16]">{curSym}{fmtN(aOpen, 2)}</b></span><span className="text-slate-500">สูง: <b className="text-emerald-700">{curSym}{fmtN(aHigh, 2)}</b></span><span className="text-slate-500">ต่ำ: <b className="text-rose-600">{curSym}{fmtN(aLow, 2)}</b></span><span className="text-slate-500">ปิด: <b className={aBull ? "text-emerald-700" : "text-rose-600"}>{curSym}{fmtN(aClose, 2)}</b></span><span className={`font-extrabold px-2 py-0.5 rounded-full text-[11px] ${aChg >= 0 ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-700"}`}>{sg(aChg, 2)}</span></div></div>
+
       <div className="relative w-full overflow-hidden">
-        <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-44 md:h-52 overflow-visible">
+        <svg viewBox={`0 0 ${W} ${H}`} onMouseMove={(e)=>{const r=e.currentTarget.getBoundingClientRect();if(!r.width)return;const rx=((e.clientX-r.left)/r.width)*W;const rt=Math.max(0,Math.min(1,(rx-padX)/plotW));setHoverIdx((chartType==="candle"||chartType==="bar")?Math.min(history.length-1,Math.max(0,Math.floor(rt*history.length))):Math.min(history.length-1,Math.max(0,Math.round(rt*(history.length-1)))));}} onTouchMove={(e)=>{const t=e.touches[0];if(!t)return;const r=e.currentTarget.getBoundingClientRect();if(!r.width)return;const rx=((t.clientX-r.left)/r.width)*W;const rt=Math.max(0,Math.min(1,(rx-padX)/plotW));setHoverIdx((chartType==="candle"||chartType==="bar")?Math.min(history.length-1,Math.max(0,Math.floor(rt*history.length))):Math.min(history.length-1,Math.max(0,Math.round(rt*(history.length-1)))));}} onMouseLeave={()=>setHoverIdx(null)} className="w-full h-44 md:h-52 overflow-visible cursor-crosshair">
           <defs>
             <linearGradient id="gradUpFintech" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="#10b981" stopOpacity="0.22" />
@@ -725,6 +733,8 @@ export default function Page() {
   const [activeQ, setActiveQ] = useState<number>(0);
   const [activeStmt, setActiveStmt] = useState<"is" | "bs" | "cf" | "yr">("is");
   const [checkedItems, setCheckedItems] = useState<Record<string, boolean>>({});
+  const liveRef = useRef({ ticker: "AAPL", range: "3mo", watch: DEFAULT_WATCHLIST });
+  liveRef.current = { ticker: selectedTicker, range: chartRange, watch: watchlist };
 
   const selectStock = async (tickerInput: string, rangeOverride?: string, stayOnCurrentView?: boolean) => {
     const s = tickerInput.trim().toUpperCase();
