@@ -1,6 +1,9 @@
 "use client";
 import React,{useState}from"react";
 export interface ProOhlcPoint{date:string;open?:number;high?:number;low?:number;close:number;}
+const sg=(x:number,d=2)=>`${x>=0?"+":""}${x.toFixed(d)}%`;
+const thd=(s:string)=>s||"ล่าสุด";
+
 export default function ProChart({
   history,
   currency,
