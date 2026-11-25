@@ -404,6 +404,7 @@ async function fetchYahooFinancialsFallback(symbol: string) {
   }
 }
 
+async function fetchLiveQuotesBatch(syms:string[]){const out:Record<string,{price?:number;prevClose?:number;open?:number;high?:number;low?:number;time?:number}>={};if(!syms.length)return out;try{const u=`https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(syms.join(","))}`;let res=await fetchWithTimeout(u,{headers:{"User-Agent":"Mozilla/5.0"},cache:"no-store"},4000).catch(()=>null);if(!res||!res.ok)res=await fetchWithTimeout(u.replace("query1","query2"),{headers:{"User-Agent":"Mozilla/5.0"},cache:"no-store"},4000).catch(()=>null);if(res&&res.ok){const list=(await res.json())?.quoteResponse?.result||[];for(const q of list){if(q?.symbol)out[String(q.symbol).toUpperCase()]={price:q.regularMarketPrice,prevClose:q.regularMarketPreviousClose,open:q.regularMarketOpen,high:q.regularMarketDayHigh,low:q.regularMarketDayLow,time:q.regularMarketTime};}}}catch{}return out;}
 async function fetchTickerChartData(tk: string, range = "1mo", interval = "1d", includeSparkline = false, includeCloses = false) {
   const cacheKey = `chart:${tk}:${range}:${interval}:${includeSparkline ? 1 : 0}:${includeCloses ? 1 : 0}`;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -422,7 +423,7 @@ async function fetchTickerChartData(tk: string, range = "1mo", interval = "1d", 
     const dCloses: number[] = (dQuote.close || []).filter((v: number | null): v is number => typeof v === "number" && isFinite(v));
     const dVolumes: number[] = (dQuote.volume || []).filter((v: number | null): v is number => typeof v === "number" && isFinite(v));
 
-    const price = meta.regularMarketPrice ?? dCloses[dCloses.length - 1] ?? 0;
+    const liveQ=(await fetchLiveQuotesBatch([tk]))[tk.toUpperCase()];const price = liveQ?.price ?? meta.regularMarketPrice ?? dCloses[dCloses.length - 1] ?? 0;if(liveQ?.open)meta.regularMarketOpen=liveQ.open;if(liveQ?.high)meta.regularMarketDayHigh=liveQ.high;if(liveQ?.low)meta.regularMarketDayLow=liveQ.low;if(liveQ?.time)meta.regularMarketTime=liveQ.time;
     let prevClose = meta.regularMarketPreviousClose;
     if (!prevClose || Math.abs(prevClose - price) < 0.0001) {
       if (dCloses.length >= 2 && Math.abs(dCloses[dCloses.length - 1] - price) < 0.05) prevClose = dCloses[dCloses.length - 2];
